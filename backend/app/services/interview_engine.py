@@ -88,13 +88,13 @@ class InterviewEngineService:
                 candidate_info=candidate_info
             )
             
-            # Create AI Agent with avatar, voice, STT/TTS
+            #  Create AI Agent with avatar, voice, STT/TTS
             agent_id = await self.videosdk.create_ai_agent(
-                meeting_id=meeting_id,
-                interviewer_name="Sarah",
-                questions=question_texts,
-                system_prompt=system_prompt,
-                voice_id="en-US-Neural2-F"  # Female professional voice
+            meeting_id=meeting_id,
+            interviewer_name="Sarah",
+            questions=question_texts,
+            system_prompt=system_prompt,
+            voice="en-US-Neural2-F"  
             )
             
             if agent_id:
@@ -273,3 +273,171 @@ class InterviewEngineService:
         )
         
         return result.modified_count > 0
+    
+    async def simulate_interview_conversation(
+        self,
+        interview_id: str,
+        db
+    ) -> bool:
+        """
+        Simulate a complete interview conversation using Groq AI.
+        Fallback when VideoSDK agent is not available.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        interview = await db.interviews.find_one({"_id": ObjectId(interview_id)})
+        if not interview:
+            raise ValueError("Interview not found")
+
+        if interview.get("status") != "in_progress":
+            raise ValueError("Interview must be in progress to simulate")
+
+        questions = [Question(**q) for q in interview.get("questions", [])]
+
+        if not questions:
+            logger.warning("No questions found for interview simulation")
+            return False
+
+        # ---------- Try worker simulation ----------
+        agent_id = interview.get("agent_id")
+        if agent_id:
+            try:
+                import httpx
+                from app.core.config import settings
+
+                worker_url = settings.AGENT_WORKER_URL
+
+                async with httpx.AsyncClient(timeout=30) as client:
+                    response = await client.post(f"{worker_url}/simulate/{agent_id}")
+
+                    if response.status_code == 200:
+                        transcript_response = await client.get(
+                            f"{worker_url}/transcript/{agent_id}"
+                        )
+
+                        if transcript_response.status_code == 200:
+                            transcript = transcript_response.json()["transcript"]
+
+                            conversation = []
+                            for msg in transcript:
+                                conversation.append({
+                                    "speaker": "ai" if msg["role"] == "assistant" else "candidate",
+                                    "text": msg["content"],
+                                    "timestamp": datetime.utcnow()
+                                })
+
+                            await db.interviews.update_one(
+                                {"_id": ObjectId(interview_id)},
+                                {"$set": {
+                                    "conversation": conversation,
+                                    "updated_at": datetime.utcnow()
+                                }}
+                            )
+
+                            logger.info(f"✅ Simulated {len(conversation)} messages via worker")
+                            return True
+
+            except Exception as e:
+                logger.warning(f"Worker simulation failed: {e}, using fallback")
+
+        # ---------- Fallback Groq-only simulation ----------
+        conversation = []
+
+        # AI greeting
+        conversation.append({
+            "speaker": "ai",
+            "text": "Hello! I'm your AI interviewer. Let's begin.",
+            "timestamp": datetime.utcnow()
+        })
+
+        # Loop through each question
+        for question in questions:
+            # Ask question
+            conversation.append({
+                "speaker": "ai",
+                "text": question.question_text,
+                "timestamp": datetime.utcnow()
+            })
+
+            # Generate answer
+            candidate_answer = await self._generate_simulated_answer(
+                question.question_text,
+                question.category
+            )
+
+            conversation.append({
+                "speaker": "candidate",
+                "text": candidate_answer,
+                "timestamp": datetime.utcnow()
+            })
+
+            # Acknowledgment
+            conversation.append({
+                "speaker": "ai",
+                "text": "Thanks for the answer.",
+                "timestamp": datetime.utcnow()
+            })
+
+        # End message
+        conversation.append({
+            "speaker": "ai",
+            "text": "That concludes our interview. Thank you!",
+            "timestamp": datetime.utcnow()
+        })
+
+        # Save
+        await db.interviews.update_one(
+            {"_id": ObjectId(interview_id)},
+            {"$set": {
+                "conversation": conversation,
+                "updated_at": datetime.utcnow()
+            }}
+        )
+
+        logger.info(f"✅ Simulated {len(conversation)} messages via fallback")
+        return True
+
+    async def _generate_simulated_answer(
+        self,
+        question: str,
+        category: str
+    ) -> str:
+        """Generate a simulated candidate answer using Groq AI."""
+        from app.core.config import settings
+
+        if not settings.GROQ_API_KEY:
+            return (
+                "Based on my experience, I would analyze the requirements "
+                "and implement a clear, maintainable solution."
+            )
+
+        try:
+            from groq import Groq
+            client = Groq(api_key=settings.GROQ_API_KEY)
+
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"You are a job candidate. Give a polished, professional "
+                            f"2–3 sentence answer to a {category} interview question."
+                        )
+                    },
+                    {"role": "user", "content": question}
+                ],
+                temperature=0.7,
+                max_tokens=200
+            )
+
+            return response.choices[0].message.content
+
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to generate answer: {e}")
+            return (
+                "I would approach this by breaking down the requirements and applying "
+                "best practices to deliver an effective solution."
+            )

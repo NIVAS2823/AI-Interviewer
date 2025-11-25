@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom';
 import { Video, Zap, TrendingUp, Shield, ArrowRight, CheckCircle } from 'lucide-react';
 
 export default function Landing() {
+
+  console.log("On landing page")
   const features = [
     {
       icon: Video,
@@ -150,6 +152,22 @@ export default function Landing() {
           </div>
         </div>
       </section>
+
+
+      <button 
+  onClick={async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/v1/health');
+      const data = await response.json();
+      alert('✅ Backend Connected!\n' + JSON.stringify(data, null, 2));
+    } catch (error) {
+      alert('❌ Backend connection failed!\n' + error.message);
+    }
+  }}
+  className="bg-blue-500 text-white px-4 py-2 rounded"
+>
+  Test Backend Connection
+</button>
 
       {/* CTA Section */}
       <section className="py-20 px-4 bg-primary-600 text-white">

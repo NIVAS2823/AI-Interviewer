@@ -16,6 +16,7 @@ import ResumeDetail from './pages/ResumeDetail';
 import Interviews from './pages/Interviews';
 import InterviewNew from './pages/InterviewNew';
 import InterviewDetail from './pages/InterviewDetail';
+import InterviewRoom from './pages/InterviewRoom';
 
 // Protected Route Component
 function ProtectedRoute({ children }) {
@@ -129,6 +130,14 @@ function App() {
               <Layout>
                 <InterviewDetail />
               </Layout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/interviews/:id/room"
+          element={
+            <ProtectedRoute>
+              <InterviewRoom />
             </ProtectedRoute>
           }
         />

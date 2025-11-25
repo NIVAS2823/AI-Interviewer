@@ -10,17 +10,24 @@ class Settings(BaseSettings):
 
     # Database
     MONGODB_URL: str = "mongodb://mongodb:27017/ai_interviewer"
-    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_URL: str = "redis://redis:6379/0"
 
     # JWT
     JWT_SECRET_KEY: str = "your-secret-key-change-in-production"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 43200
 
-    # AI Keys (FREE)
-    GROQ_API_KEY: str = ""  
+    # AI KEYS — MUST match your .env
+    GROQ_API_KEY: str = ""
+    DEEPGRAM_API_KEY: str = ""
+    GOOGLE_TTS_API_KEY: str = ""
+
     VIDEOSDK_API_KEY: str = ""
-    VIDEOSDK_SECRET_KEY: str = ""   # ✅ REQUIRED
+    VIDEOSDK_SECRET_KEY: str = ""          # ✅ ADD THIS BACK
+    VIDEOSDK_WEBHOOK_SECRET: str = ""      # (you already added)
+    VIDEOSDK_API_URL: str = "https://api.videosdk.live/v2"
+
+    AGENT_WORKER_URL: str = "http://agent_worker:9000"
 
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173"]
@@ -46,6 +53,5 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
-
 
 settings = Settings()
