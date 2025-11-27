@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from bson import ObjectId
 from typing import Dict
 import logging
+import datetime
 
 from app.models.user import UserModel
 from app.models.interview import Evaluation
@@ -46,10 +47,39 @@ async def get_evaluation(
     evaluation = interview.get("evaluation")
 
     if not evaluation:
-        raise HTTPException(
-            404,
-            "Evaluation not yet available. Complete the interview first."
-        )
+    # If interview is completed but evaluation missing, return (and optionally persist) a zero-eval
+        if interview.get("status") == "completed":
+            zero = {
+            "skipped_interview": True,
+            "scores": {
+                "overall_score": 0,
+                "technical_score": 0,
+                "communication_score": 0,
+                "confidence_score": 0,
+                "behavioral_score": 0,
+            },
+            "sentiment": {"positive": 0.0, "neutral": 1.0, "negative": 0.0},
+            "strengths": [],
+            "improvements": ["Candidate did not answer any questions."],
+            "detailed_feedback": "Interview ended without any candidate responses.",
+            "question_scores": [],
+        }
+        # Optionally persist the fallback so future GETs return 200
+        try:
+            await db.interviews.update_one(
+                {"_id": ObjectId(interview_id)},
+                {"$set": {"evaluation": zero, "updated_at": datetime.utcnow()}}
+            )
+        except Exception:
+            logger.exception("Failed to persist fallback zero evaluation")
+
+        return Evaluation(**zero)
+    # Not completed -> genuinely not ready
+    raise HTTPException(
+        404,
+        "Evaluation not yet available. Complete the interview first."
+    )
+
 
     return Evaluation(**evaluation)
 

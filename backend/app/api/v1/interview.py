@@ -64,6 +64,7 @@ async def create_interview(
             interview_type=request.interview_type,
             difficulty=request.difficulty,
             max_questions=request.max_questions,
+            job_description=request.job_description,
             db=db,
         )
 
@@ -146,8 +147,10 @@ async def get_interview(
         id=str(interview["_id"]),
         candidate_id=str(interview["candidate_id"]),
         resume_id=str(interview["resume_id"]) if interview.get("resume_id") else None,
+        job_description=interview.get("job_description"),
         interview_type=interview.get("interview_type"),
         difficulty=interview.get("difficulty"),
+        max_questions=interview.get("max_questions", 5),   # ✅ REQUIRED FIX
         status=interview.get("status"),
         questions=interview.get("questions", []),
         conversation=interview.get("conversation", []),
@@ -159,7 +162,8 @@ async def get_interview(
         end_time=interview.get("end_time"),
         duration_minutes=interview.get("duration_minutes"),
         created_at=interview["created_at"],
-    )
+        )
+
 
 
 # --------------------------------------------------------

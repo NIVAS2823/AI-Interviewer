@@ -27,6 +27,16 @@ export default {
         ring: "hsl(var(--ring))",
         background: "hsl(var(--background))",
         foreground: "hsl(var(--foreground))",
+        neon: {
+  primary: "var(--neon-primary)",
+  secondary: "var(--neon-secondary)",
+  green: "var(--neon-green)",
+},
+darkbg: {
+  DEFAULT: "var(--bg-dark)",
+  card: "var(--bg-card)",
+}
+,
 
         // Your existing palette (kept)
         primary: {

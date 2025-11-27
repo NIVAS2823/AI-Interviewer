@@ -10,6 +10,10 @@ class InterviewCreateRequest(BaseModel):
     interview_type: str = Field(..., pattern="^(technical|behavioral|hr|mixed)$")
     difficulty: str = Field(default="easy", pattern="^(easy|medium|hard)$")
     max_questions: int = Field(default=5, ge=3, le=10)
+    job_description: Optional[str] = Field(
+        default=None,
+        description="Job description for context (optional but recommended)"
+    )
     
     class Config:
         json_schema_extra = {
@@ -17,7 +21,8 @@ class InterviewCreateRequest(BaseModel):
                 "resume_id": "507f1f77bcf86cd799439011",
                 "interview_type": "mixed",
                 "difficulty": "medium",
-                "max_questions": 5
+                "max_questions": 5,
+                 "job_description": "Senior Full Stack Developer with 3+ years experience in React, Python, and FastAPI. Must have strong problem-solving skills and experience with cloud deployment." 
             }
         }
 
@@ -55,12 +60,17 @@ class InterviewDetailResponse(BaseModel):
     id: str
     candidate_id: str
     resume_id: Optional[str] = None
+    job_description: Optional[str] = None  # ADD THIS
     interview_type: str
     difficulty: str
     status: str
+    max_questions: int  # ADD THIS
     questions: List[Question]
     conversation: List[ConversationMessage]
     evaluation: Optional[Evaluation] = None
+    session_id: Optional[str] = None  # ADD THIS
+    meeting_token: Optional[str] = None  # ADD THIS
+    agent_id: Optional[str] = None  # ADD THIS
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     duration_minutes: Optional[int] = None

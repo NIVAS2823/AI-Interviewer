@@ -1,82 +1,97 @@
-import React from 'react';
-import { Link } from 'react-router-dom';
-import { Video, Zap, TrendingUp, Shield, ArrowRight, CheckCircle } from 'lucide-react';
+import React from "react";
+import { Link } from "react-router-dom";
+import {
+  Video,
+  Zap,
+  TrendingUp,
+  Shield,
+  ArrowRight,
+  CheckCircle,
+} from "lucide-react";
 
 export default function Landing() {
-
-  console.log("On landing page")
   const features = [
     {
       icon: Video,
-      title: 'AI-Powered Video Interviews',
-      description: 'Practice with realistic AI interviewers featuring avatars and natural conversation.',
+      title: "AI-Powered Video Interviews",
+      description:
+        "Practice with realistic AI interviewers featuring avatars and natural conversation.",
     },
     {
       icon: Zap,
-      title: 'Instant Feedback',
-      description: 'Get detailed evaluation and scores immediately after your interview.',
+      title: "Instant Feedback",
+      description:
+        "Get detailed evaluation and scores immediately after your interview.",
     },
     {
       icon: TrendingUp,
-      title: 'Track Progress',
-      description: 'Monitor your improvement over time with detailed analytics.',
+      title: "Track Progress",
+      description:
+        "Monitor your improvement over time with detailed analytics.",
     },
     {
       icon: Shield,
-      title: 'Completely Free',
-      description: 'Built with free and open-source tools. No hidden costs or subscriptions.',
+      title: "Completely Free",
+      description:
+        "Built with free and open-source tools. No hidden costs or subscriptions.",
     },
   ];
 
   const benefits = [
-    'Unlimited practice interviews',
-    'AI-powered question generation',
-    'Detailed performance analysis',
-    'Resume parsing & optimization',
-    'Multi-category scoring',
-    'Personalized improvement tips',
+    "Unlimited practice interviews",
+    "AI-powered question generation",
+    "Detailed performance analysis",
+    "Resume parsing & optimization",
+    "Multi-category scoring",
+    "Personalized improvement tips",
   ];
 
   return (
-    <div className="min-h-screen">
-      {/* Hero Section */}
-      <section className="relative bg-gradient-to-br from-primary-600 to-primary-800 text-white py-20 px-4">
-        <div className="max-w-6xl mx-auto">
-          <div className="text-center animate-fade-in">
-            <h1 className="text-5xl md:text-6xl font-bold mb-6">
-              Ace Your Next Interview
-            </h1>
-            <p className="text-xl md:text-2xl text-primary-100 mb-8 max-w-3xl mx-auto">
-              Practice with AI-powered video interviews. Get instant feedback.
-              Improve your skills. Land your dream job.
-            </p>
-            <div className="flex flex-col sm:flex-row gap-4 justify-center">
-              <Link
-                to="/register"
-                className="inline-flex items-center justify-center px-8 py-4 bg-white text-primary-700 rounded-lg font-semibold text-lg hover:bg-primary-50 transition-all shadow-lg hover:shadow-xl active:scale-95"
-              >
-                Get Started Free
-                <ArrowRight className="ml-2 w-5 h-5" />
-              </Link>
-              <Link
-                to="/login"
-                className="inline-flex items-center justify-center px-8 py-4 border-2 border-white text-white rounded-lg font-semibold text-lg hover:bg-white hover:text-primary-700 transition-all"
-              >
-                Sign In
-              </Link>
-            </div>
+    <div className="min-h-screen bg-darkbg text-gray-200">
+      {/* HERO SECTION */}
+      <section className="relative py-24 px-4 bg-gradient-to-br from-[#00f0ff22] to-[#ff00e622] backdrop-blur-md border-b border-white/10">
+        <div className="max-w-6xl mx-auto text-center animate-fade-in">
+          <h1 className="text-5xl md:text-6xl font-extrabold mb-6 text-neon-primary drop-shadow-[0_0_10px_var(--neon-primary)]">
+            Ace Your Next Interview
+          </h1>
+
+          <p className="text-xl md:text-2xl text-gray-300 mb-10 max-w-3xl mx-auto">
+            Practice with AI-powered video interviews. Get instant feedback.  
+            Improve your skills. Land your dream job.
+          </p>
+
+          <div className="flex flex-col sm:flex-row gap-4 justify-center">
+            {/* Primary CTA */}
+            <Link
+              to="/register"
+              className="px-8 py-4 rounded-xl font-semibold text-lg
+              bg-neon-primary text-black shadow-[0_0_15px_var(--neon-primary)]
+              hover:shadow-[0_0_25px_var(--neon-primary)] transition-all active:scale-95"
+            >
+              Get Started Free
+              <ArrowRight className="inline ml-2 w-5 h-5" />
+            </Link>
+
+            {/* Secondary CTA */}
+            <Link
+              to="/login"
+              className="px-8 py-4 rounded-xl font-semibold text-lg border border-neon-primary
+              text-neon-primary hover:bg-neon-primary hover:text-black transition-all active:scale-95"
+            >
+              Sign In
+            </Link>
           </div>
         </div>
       </section>
 
-      {/* Features Section */}
-      <section className="py-20 px-4 bg-white">
+      {/* FEATURES SECTION */}
+      <section className="py-20 px-4 bg-darkbg">
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-16">
-            <h2 className="text-4xl font-bold text-gray-900 mb-4">
+            <h2 className="text-4xl font-bold text-gray-100 mb-4">
               How It Works
             </h2>
-            <p className="text-xl text-gray-600">
+            <p className="text-xl text-gray-400">
               Simple, powerful, and completely free
             </p>
           </div>
@@ -84,19 +99,24 @@ export default function Landing() {
           <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
             {features.map((feature, index) => {
               const Icon = feature.icon;
+
               return (
                 <div
                   key={index}
-                  className="text-center p-6 rounded-xl hover:shadow-lg transition-shadow animate-slide-up"
-                  style={{ animationDelay: `${index * 100}ms` }}
+                  className="p-6 rounded-2xl bg-darkbg-card border border-white/10
+                  hover:border-neon-primary hover:shadow-[0_0_20px_var(--neon-primary)]
+                  transition-all text-center animate-slide-up"
+                  style={{ animationDelay: `${index * 120}ms` }}
                 >
-                  <div className="inline-flex items-center justify-center w-16 h-16 bg-primary-100 rounded-full mb-4">
-                    <Icon className="w-8 h-8 text-primary-600" />
+                  <div className="inline-flex items-center justify-center w-16 h-16 
+                  bg-[#00f0ff10] rounded-full mb-4 border border-neon-primary/60">
+                    <Icon className="w-9 h-9 text-neon-primary" />
                   </div>
-                  <h3 className="text-xl font-semibold text-gray-900 mb-2">
+
+                  <h3 className="text-xl font-semibold text-white mb-2">
                     {feature.title}
                   </h3>
-                  <p className="text-gray-600">{feature.description}</p>
+                  <p className="text-gray-400">{feature.description}</p>
                 </div>
               );
             })}
@@ -104,86 +124,69 @@ export default function Landing() {
         </div>
       </section>
 
-      {/* Benefits Section */}
-      <section className="py-20 px-4 bg-gray-50">
-        <div className="max-w-6xl mx-auto">
-          <div className="grid md:grid-cols-2 gap-12 items-center">
-            <div>
-              <h2 className="text-4xl font-bold text-gray-900 mb-6">
-                Everything You Need to Succeed
-              </h2>
-              <p className="text-lg text-gray-600 mb-8">
-                Our AI-powered platform provides comprehensive interview
-                preparation with features designed to boost your confidence
-                and performance.
-              </p>
-              <div className="space-y-4">
-                {benefits.map((benefit, index) => (
-                  <div key={index} className="flex items-start space-x-3">
-                    <CheckCircle className="w-6 h-6 text-green-500 flex-shrink-0 mt-0.5" />
-                    <span className="text-gray-700">{benefit}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+      {/* BENEFITS SECTION */}
+      <section className="py-20 px-4 bg-darkbg">
+        <div className="max-w-6xl mx-auto grid md:grid-cols-2 gap-12 items-center">
+          {/* LEFT */}
+          <div>
+            <h2 className="text-4xl font-bold text-gray-100 mb-6">
+              Everything You Need to Succeed
+            </h2>
+            <p className="text-lg text-gray-400 mb-8">
+              Our AI-powered platform provides comprehensive interview
+              preparation with features designed to boost your confidence and performance.
+            </p>
 
-            <div className="bg-white p-8 rounded-2xl shadow-xl">
-              <div className="space-y-6">
-                <div className="border-l-4 border-primary-500 pl-4">
-                  <div className="text-4xl font-bold text-gray-900 mb-1">
-                    100%
-                  </div>
-                  <div className="text-gray-600">Free Forever</div>
+            <div className="space-y-4">
+              {benefits.map((benefit, index) => (
+                <div key={index} className="flex items-start space-x-3">
+                  <CheckCircle className="w-6 h-6 text-neon-green flex-shrink-0 mt-0.5" />
+                  <span className="text-gray-300">{benefit}</span>
                 </div>
-                <div className="border-l-4 border-green-500 pl-4">
-                  <div className="text-4xl font-bold text-gray-900 mb-1">
-                    ∞
-                  </div>
-                  <div className="text-gray-600">Unlimited Interviews</div>
-                </div>
-                <div className="border-l-4 border-blue-500 pl-4">
-                  <div className="text-4xl font-bold text-gray-900 mb-1">
-                    AI
-                  </div>
-                  <div className="text-gray-600">Powered by Groq & LLaMA</div>
-                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* RIGHT – METRICS CARD */}
+          <div className="bg-darkbg-card border border-white/10 p-8 rounded-2xl shadow-[0_0_20px_rgba(0,0,0,0.3)]">
+            <div className="space-y-8">
+              <div className="border-l-4 border-neon-primary pl-4">
+                <div className="text-4xl font-bold text-white mb-1">100%</div>
+                <div className="text-gray-400">Free Forever</div>
+              </div>
+
+              <div className="border-l-4 border-neon-green pl-4">
+                <div className="text-4xl font-bold text-white mb-1">∞</div>
+                <div className="text-gray-400">Unlimited Interviews</div>
+              </div>
+
+              <div className="border-l-4 border-neon-secondary pl-4">
+                <div className="text-4xl font-bold text-white mb-1">AI</div>
+                <div className="text-gray-400">Powered by Groq & LLaMA</div>
               </div>
             </div>
           </div>
         </div>
       </section>
 
-
-      <button 
-  onClick={async () => {
-    try {
-      const response = await fetch('http://localhost:8000/api/v1/health');
-      const data = await response.json();
-      alert('✅ Backend Connected!\n' + JSON.stringify(data, null, 2));
-    } catch (error) {
-      alert('❌ Backend connection failed!\n' + error.message);
-    }
-  }}
-  className="bg-blue-500 text-white px-4 py-2 rounded"
->
-  Test Backend Connection
-</button>
-
-      {/* CTA Section */}
-      <section className="py-20 px-4 bg-primary-600 text-white">
+      {/* FINAL CTA SECTION */}
+      <section className="py-20 px-4 bg-[#00f0ff15] border-t border-white/10">
         <div className="max-w-4xl mx-auto text-center">
-          <h2 className="text-4xl font-bold mb-6">
+          <h2 className="text-4xl font-bold text-white mb-6">
             Ready to Start Practicing?
           </h2>
-          <p className="text-xl text-primary-100 mb-8">
+          <p className="text-xl text-gray-300 mb-8">
             Join thousands of job seekers improving their interview skills with AI
           </p>
+
           <Link
             to="/register"
-            className="inline-flex items-center justify-center px-8 py-4 bg-white text-primary-700 rounded-lg font-semibold text-lg hover:bg-primary-50 transition-all shadow-lg hover:shadow-xl active:scale-95"
+            className="px-8 py-4 bg-neon-primary text-black rounded-xl font-semibold text-lg
+            shadow-[0_0_15px_var(--neon-primary)] hover:shadow-[0_0_25px_var(--neon-primary)]
+            transition-all active:scale-95"
           >
             Create Free Account
-            <ArrowRight className="ml-2 w-5 h-5" />
+            <ArrowRight className="inline ml-2 w-5 h-5" />
           </Link>
         </div>
       </section>

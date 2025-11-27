@@ -3,20 +3,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies including pkg-config and FFmpeg dev libraries
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    libmagic1 \
-    pkg-config \
-    libavformat-dev \
-    libavcodec-dev \
-    libavdevice-dev \
-    libavutil-dev \
-    libswscale-dev \
-    libswresample-dev \
-    libavfilter-dev \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ffmpeg libmagic1 && \
+    rm -rf /var/lib/apt
 
 # Copy requirements and install
 COPY requirements.txt .

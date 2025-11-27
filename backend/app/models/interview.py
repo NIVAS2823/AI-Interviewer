@@ -73,6 +73,8 @@ class InterviewModel(BaseModel):
     resume_id: Optional[PyObjectId] = None
     job_id: Optional[PyObjectId] = None  # For HR interviews
 
+    job_description: Optional[str] = None
+
     # VideoSDK details
     session_id: Optional[str] = None  # VideoSDK meeting ID
     meeting_token: Optional[str] = None
