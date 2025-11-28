@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from bson import ObjectId
 from typing import Dict
 import logging
@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 
 class SingleAnswerEvaluationRequest(BaseModel):
-    """Request to evaluate a single answer"""
     question: str
     answer: str
     expected_topics: list[str] = []
@@ -30,27 +29,50 @@ async def get_evaluation(
     db=Depends(get_database)
 ):
     """
-    Get evaluation for completed interview.
+    Return interview evaluation.
+    Never returns 404 if interview is completed.
     """
 
     if not ObjectId.is_valid(interview_id):
-        raise HTTPException(400, "Invalid interview ID")
+        raise HTTPException(status_code=400, detail="Invalid interview ID")
 
-    # Ownership check
+    # Authorization
     interview = await db.interviews.find_one(
         {"_id": ObjectId(interview_id), "candidate_id": current_user.id}
     )
 
     if not interview:
-        raise HTTPException(404, "Interview not found")
+        raise HTTPException(status_code=404, detail="Interview not found")
 
+    status_flag = interview.get("status")
     evaluation = interview.get("evaluation")
 
-    if not evaluation:
-    # If interview is completed but evaluation missing, return (and optionally persist) a zero-eval
-        if interview.get("status") == "completed":
-            zero = {
-            "skipped_interview": True,
+    # -------------------------------
+    # CASE 1: Evaluation exists
+    # -------------------------------
+    if evaluation:
+        try:
+            return Evaluation(**evaluation)
+        except Exception:
+            # Stored eval corrupted → recover by wrapping into schema
+            logger.error("Corrupted evaluation, repairing...")
+            safe = Evaluation(
+                scores=evaluation.get("scores", {}),
+                sentiment=evaluation.get("sentiment"),
+                strengths=evaluation.get("strengths", []),
+                improvements=evaluation.get("improvements", []),
+                detailed_feedback=evaluation.get("detailed_feedback", ""),
+                question_scores=evaluation.get("question_scores", []),
+            )
+            return safe
+
+    # -------------------------------------------------------
+    # CASE 2: Interview completed but evaluation missing → FIX
+    # -------------------------------------------------------
+    if status_flag == "completed":
+        logger.warning(f"Missing evaluation for completed interview {interview_id}, creating fallback zero-eval.")
+
+        zero_eval = {
             "scores": {
                 "overall_score": 0,
                 "technical_score": 0,
@@ -64,24 +86,25 @@ async def get_evaluation(
             "detailed_feedback": "Interview ended without any candidate responses.",
             "question_scores": [],
         }
-        # Optionally persist the fallback so future GETs return 200
+
+        # Save fallback immediately
         try:
             await db.interviews.update_one(
                 {"_id": ObjectId(interview_id)},
-                {"$set": {"evaluation": zero, "updated_at": datetime.utcnow()}}
+                {"$set": {"evaluation": zero_eval, "updated_at": datetime.utcnow()}}
             )
         except Exception:
-            logger.exception("Failed to persist fallback zero evaluation")
+            logger.exception("Failed to persist fallback evaluation")
 
-        return Evaluation(**zero)
-    # Not completed -> genuinely not ready
+        return Evaluation(**zero_eval)
+
+    # -------------------------------------------------------
+    # CASE 3: Interview not completed → legit 404
+    # -------------------------------------------------------
     raise HTTPException(
-        404,
-        "Evaluation not yet available. Complete the interview first."
+        status_code=404,
+        detail="Evaluation not yet available. Complete the interview first."
     )
-
-
-    return Evaluation(**evaluation)
 
 
 @router.post("/evaluate-answer", response_model=Dict)

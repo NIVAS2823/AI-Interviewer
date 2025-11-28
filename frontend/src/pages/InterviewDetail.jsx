@@ -27,6 +27,17 @@ export default function InterviewDetail() {
 
   const pollingRef = useRef(null);
 
+  // Confirm modal state
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
+  const [confirmAction, setConfirmAction] = useState(null);
+
+  const askConfirm = (text, action) => {
+    setConfirmText(text);
+    setConfirmAction(() => action);
+    setConfirmOpen(true);
+  };
+
   /* -------------------------- LOAD INTERVIEW -------------------------- */
   useEffect(() => {
     loadInterview();
@@ -53,13 +64,11 @@ export default function InterviewDetail() {
   const loadEvaluation = async () => {
     try {
       const res = await evaluationAPI.get(id);
-      setEvaluation(res.data); // normal evaluation found
+      setEvaluation(res.data);
       stopPolling();
     } catch (err) {
-      const status = err?.response?.status;
-
-      if (status === 404) {
-        // Backend says evaluation doesn't exist → treat as skipped interview
+      if (err?.response?.status === 404) {
+        // No evaluation created → treat as skipped
         setEvaluation({ skipped_interview: true });
         stopPolling();
       }
@@ -80,38 +89,42 @@ export default function InterviewDetail() {
 
   /* -------------------------- SIMULATE -------------------------- */
   const handleSimulate = async () => {
-    if (!window.confirm("Simulate an interview?")) return;
-    setActionLoading(true);
+    askConfirm("Simulate this interview?", async () => {
+      setConfirmOpen(false);
+      setActionLoading(true);
 
-    try {
-      await interviewAPI.simulate(id);
-      toast.success("Interview simulated");
-      await loadInterview();
-    } catch {
-      toast.error("Simulation failed");
-    } finally {
-      setActionLoading(false);
-    }
+      try {
+        await interviewAPI.simulate(id);
+        toast.success("Interview simulated");
+        await loadInterview();
+      } catch {
+        toast.error("Simulation failed");
+      } finally {
+        setActionLoading(false);
+      }
+    });
   };
 
   /* -------------------------- END INTERVIEW -------------------------- */
   const handleEnd = async () => {
-    if (!window.confirm("End interview and generate evaluation?")) return;
-    setActionLoading(true);
+    askConfirm("End interview and generate evaluation?", async () => {
+      setConfirmOpen(false);
+      setActionLoading(true);
 
-    try {
-      await interviewAPI.end(id);
-      toast.success("Interview ended — generating evaluation...");
-      setTimeout(() => loadInterview(), 1500);
-      startPolling();
-    } catch {
-      toast.error("Failed to end interview");
-    } finally {
-      setActionLoading(false);
-    }
+      try {
+        await interviewAPI.end(id);
+        toast.success("Interview ended — generating evaluation...");
+        setTimeout(() => loadInterview(), 1500);
+        startPolling();
+      } catch {
+        toast.error("Failed to end interview");
+      } finally {
+        setActionLoading(false);
+      }
+    });
   };
 
-  /* -------------------------- LOADING STATE -------------------------- */
+  /* -------------------------- LOADING -------------------------- */
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
@@ -145,28 +158,57 @@ export default function InterviewDetail() {
         handleEnd={handleEnd}
       />
 
-      {/* Configuration Box */}
+      {/* Configuration */}
       <ConfigSection interview={interview} />
 
-      {/* Evaluation Section (handles skipped safely) */}
+      {/* Evaluation */}
       <EvaluationWrapper interview={interview} evaluation={evaluation} />
 
-      {/* Questions (hide if skipped) */}
+      {/* Questions */}
       {!evaluation?.skipped_interview && (
         <QuestionsList interview={interview} />
       )}
 
-      {/* Conversation Transcript (hide if skipped) */}
+      {/* Transcript */}
       {!evaluation?.skipped_interview &&
         interview.conversation?.length > 0 && (
           <Conversation conversation={interview.conversation} />
         )}
+
+      {/* ===================== CONFIRM MODAL ===================== */}
+      {confirmOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-darkbg-card p-6 rounded-xl border border-white/10 shadow-xl w-[90%] max-w-md text-center">
+            <h3 className="text-xl font-semibold text-white mb-4">
+              Are you sure?
+            </h3>
+
+            <p className="text-gray-300 mb-6">{confirmText}</p>
+
+            <div className="flex items-center justify-center space-x-4">
+              <button
+                className="px-5 py-2 rounded-lg bg-red-600/20 text-red-400 border border-red-400/40 hover:bg-red-600/30 transition"
+                onClick={() => confirmAction && confirmAction()}
+              >
+                Yes, Continue
+              </button>
+
+              <button
+                className="px-5 py-2 rounded-lg border border-white/20 text-gray-300 hover:bg-white/10 transition"
+                onClick={() => setConfirmOpen(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 /* ====================================================================== */
-/*                               COMPONENTS                                */
+/*                               SUB COMPONENTS                            */
 /* ====================================================================== */
 
 function HeaderSection({ interview, id, handleSimulate, handleEnd }) {
@@ -188,10 +230,9 @@ function HeaderSection({ interview, id, handleSimulate, handleEnd }) {
           <>
             <Link
               to={`/interviews/${id}/room`}
-              className="px-5 py-2 rounded-lg bg-neon-primary text-black font-semibold shadow"
+              className="px-5 py-2 rounded-lg bg-neon-primary text-black font-semibold shadow flex items-center"
             >
-              <PlayCircle className="w-4 h-4 mr-2 inline" />
-              Join Interview
+              <PlayCircle className="w-4 h-4 mr-2" /> Join Interview
             </Link>
 
             <button
@@ -208,8 +249,7 @@ function HeaderSection({ interview, id, handleSimulate, handleEnd }) {
             to={`/interviews/${id}/room`}
             className="px-5 py-2 rounded-lg bg-neon-primary text-black font-semibold animate-pulse flex items-center shadow"
           >
-            <PlayCircle className="w-4 h-4 mr-2" />
-            Rejoin Interview
+            <PlayCircle className="w-4 h-4 mr-2" /> Rejoin Interview
           </Link>
         )}
 
@@ -219,14 +259,15 @@ function HeaderSection({ interview, id, handleSimulate, handleEnd }) {
             onClick={handleEnd}
             className="px-5 py-2 rounded-lg border border-red-500/40 text-red-400 hover:bg-red-500/10 transition flex items-center"
           >
-            <StopCircle className="w-4 h-4 mr-2" />
-            End Interview
+            <StopCircle className="w-4 h-4 mr-2" /> End Interview
           </button>
         )}
       </div>
     </div>
   );
 }
+
+/* --------------------------- CONFIG SECTION --------------------------- */
 
 function ConfigSection({ interview }) {
   return (
@@ -259,9 +300,7 @@ function ConfigItem({ label, value }) {
   );
 }
 
-/* ====================================================================== */
-/*                         EVALUATION HANDLING                             */
-/* ====================================================================== */
+/* ------------------------ EVALUATION HANDLING ------------------------ */
 
 function EvaluationWrapper({ interview, evaluation }) {
   if (!evaluation) {
@@ -283,9 +322,6 @@ function SkippedInterviewBanner() {
       <p className="text-gray-300">
         No questions were answered. No evaluation was generated.
       </p>
-      <p className="text-gray-400 text-sm mt-1">
-        Start a new interview to receive feedback.
-      </p>
     </div>
   );
 }
@@ -294,10 +330,7 @@ function PendingEvaluation() {
   return (
     <div className="bg-yellow-500/10 border border-yellow-500/40 p-6 rounded-xl text-center">
       <Loader2 className="w-6 h-6 animate-spin text-yellow-300 mx-auto mb-2" />
-      <p className="text-yellow-200 font-medium">
-        Evaluation is being generated...
-      </p>
-      <p className="text-gray-400 text-sm">This may take a few seconds.</p>
+      <p className="text-yellow-200 font-medium">Evaluation is being generated...</p>
     </div>
   );
 }
@@ -374,9 +407,7 @@ function DetailBlock({ title, items, icon: Icon }) {
   );
 }
 
-/* ====================================================================== */
-/*                         QUESTIONS + CONVERSATION                        */
-/* ====================================================================== */
+/* ------------------------------ QUESTIONS ------------------------------ */
 
 function QuestionsList({ interview }) {
   return (
@@ -398,6 +429,8 @@ function QuestionsList({ interview }) {
   );
 }
 
+/* ----------------------------- CONVERSATION ----------------------------- */
+
 function Conversation({ conversation }) {
   return (
     <div className="bg-darkbg-card p-6 rounded-xl border border-white/10 shadow">
@@ -409,7 +442,9 @@ function Conversation({ conversation }) {
         {conversation.map((msg, idx) => (
           <div
             key={idx}
-            className={`flex ${msg.speaker === "candidate" ? "justify-end" : "justify-start"}`}
+            className={`flex ${
+              msg.speaker === "candidate" ? "justify-end" : "justify-start"
+            }`}
           >
             <div
               className={`max-w-[80%] p-4 rounded-lg shadow ${

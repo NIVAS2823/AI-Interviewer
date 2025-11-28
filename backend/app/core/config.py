@@ -13,20 +13,38 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://redis:6379/0"
 
     # JWT
-    JWT_SECRET_KEY: str = "your-secret-key-change-in-production"
+    JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 43200
 
-    # AI KEYS — MUST match your .env
+    # Groq AI
     GROQ_API_KEY: str = ""
-    DEEPGRAM_API_KEY: str = ""
-    GOOGLE_TTS_API_KEY: str = ""
 
+    # Deepgram STT (NEW)
+    DEEPGRAM_API_KEY: str = ""
+
+    # Azure TTS (NEW)
+    AZURE_SPEECH_KEY: str = ""
+    AZURE_SPEECH_REGION: str = ""
+
+    #Google TTS
+    GOOGLE_TTS_API_KEY:str=""
+
+    # Cloudflare R2 (NEW)
+    R2_ACCESS_KEY_ID: str = ""
+    R2_SECRET_ACCESS_KEY: str = ""
+    R2_ENDPOINT: str = ""
+    R2_BUCKET_NAME: str = ""
+    R2_PUBLIC_URL: str = ""
+
+     # VideoSDK
     VIDEOSDK_API_KEY: str = ""
-    VIDEOSDK_SECRET_KEY: str = ""          # ✅ ADD THIS BACK
-    VIDEOSDK_WEBHOOK_SECRET: str = ""      # (you already added)
+    VIDEOSDK_SECRET_KEY: str = ""
+    VIDEOSDK_WEBHOOK_SECRET: str = ""
     VIDEOSDK_API_URL: str = "https://api.videosdk.live/v2"
 
+
+     # Agent Worker
     AGENT_WORKER_URL: str = "http://agent_worker:9000"
 
     # CORS

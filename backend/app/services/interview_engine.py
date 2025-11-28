@@ -1,14 +1,20 @@
 from typing import Dict, List, Optional
 from bson import ObjectId
 from datetime import datetime
+import json
+import re
+import logging
+from pymongo import ReturnDocument
 
 from app.models.interview import InterviewModel, Question, ConversationMessage, Evaluation
 from app.models.resume import ResumeModel, ParsedData
 from app.services.question_generator import QuestionGeneratorService
 from app.services.evaluation_service import EvaluationService
-from app.utils.videosdk_agent import VideoSDKAgentService  # Updated import
+from app.utils.videosdk_agent import VideoSDKAgentService
 from app.core.database import get_database
+from app.utils.json_utils import extract_single_json
 
+logger = logging.getLogger(__name__)
 
 class InterviewEngineService:
     """Core interview engine with REAL VideoSDK AI agent integration"""
@@ -16,7 +22,7 @@ class InterviewEngineService:
     def __init__(self):
         self.question_generator = QuestionGeneratorService()
         self.evaluation_service = EvaluationService()
-        self.videosdk = VideoSDKAgentService()  # Enhanced VideoSDK
+        self.videosdk = VideoSDKAgentService()
 
     async def create_interview(
         self,
@@ -92,9 +98,9 @@ class InterviewEngineService:
             )
 
             if agent_id:
-                print(f"✅ REAL AI Agent created with avatar and voice!")
+                logger.info(f"✅ REAL AI Agent created with avatar and voice!")
             else:
-                print("⚠️ Agent creation failed - will use fallback mode")
+                logger.warning("⚠️ Agent creation failed - will use fallback mode")
 
         # Create interview document
         interview = InterviewModel(
@@ -117,68 +123,95 @@ class InterviewEngineService:
         result = await db.interviews.insert_one(interview_dict)
         interview.id = result.inserted_id
 
-        print(f"✅ Interview created with REAL VideoSDK AI agent: {result.inserted_id}")
+        logger.info(f"✅ Interview created with REAL VideoSDK AI agent: {result.inserted_id}")
 
         return interview
+    
 
     async def start_interview(self, interview_id: str, db) -> InterviewModel:
         """
-        Start interview session and activate AI agent
-        Also generates the first question if not already generated
+        Start interview session and activate AI agent.
+        Guaranteed to return a valid InterviewModel or raise an explicit error.
         """
-        import logging
 
-        logger = logging.getLogger(__name__)
+        logger.info(f"[START_INTERVIEW] Fetching interview {interview_id}")
 
         interview = await db.interviews.find_one({"_id": ObjectId(interview_id)})
         if not interview:
+            logger.error(f"[START_INTERVIEW] Interview {interview_id} not found in DB")
             raise ValueError("Interview not found")
 
-        # Generate first question if not already generated
+        # --------------------------------------------------------
+        # 1) Ensure first question exists
+        # --------------------------------------------------------
         questions = interview.get("questions", [])
         if len(questions) == 0:
-            logger.info(f"Generating first question for interview {interview_id}")
+            logger.info(f"[START_INTERVIEW] No questions yet. Generating Q1 for {interview_id}")
 
-            # Generate first question
             first_question = await self.generate_next_question(interview_id, db)
             if first_question:
-                logger.info(f"✅ First question generated: {first_question.question_text[:50]}...")
+                logger.info(f"[START_INTERVIEW] Q1 generated: {first_question.question_text[:80]}")
 
-            # refresh interview after mutation
+            # Refresh interview after mutation
             interview = await db.interviews.find_one({"_id": ObjectId(interview_id)})
+            logger.info(f"[START_INTERVIEW] Interview refreshed after question generation")
 
-        # Start the AI agent in the meeting (if present)
+        # --------------------------------------------------------
+        # 2) Try to start the AI Agent
+        # --------------------------------------------------------
         agent_started = False
+
         if interview.get("agent_id") and interview.get("session_id"):
-            agent_started = await self.videosdk.start_agent(
-                meeting_id=interview["session_id"], agent_id=interview["agent_id"]
+            logger.info(
+                f"[START_INTERVIEW] Attempting to start agent "
+                f"{interview['agent_id']} in room {interview['session_id']}"
             )
+            try:
+                agent_started = await self.videosdk.start_agent(
+                    meeting_id=interview["session_id"],
+                    agent_id=interview["agent_id"]
+            )
+                logger.info(f"[START_INTERVIEW] Agent start status: {agent_started}")
 
-            if agent_started:
-                print(f"✅ AI Agent is NOW LIVE in meeting!")
+            except Exception as e:
+                logger.error(f"[START_INTERVIEW] Failed to start agent: {e}")
 
-        # Update status
+        # --------------------------------------------------------
+        # 3) Mark interview as in_progress
+        # --------------------------------------------------------
+        logger.info(f"[START_INTERVIEW] Updating interview {interview_id} -> in_progress")
+
         result = await db.interviews.find_one_and_update(
             {"_id": ObjectId(interview_id)},
             {
                 "$set": {
                     "status": "in_progress",
                     "start_time": datetime.utcnow(),
+                    "updated_at": datetime.utcnow(),
                 }
             },
-            return_document=True,
+            return_document=ReturnDocument.AFTER,
         )
+
+        if not result:
+            logger.error(
+                f"[START_INTERVIEW] CRITICAL: find_one_and_update returned None for interview {interview_id}"
+            )
+            raise RuntimeError("Database failed to return updated interview document")
+
+        logger.info(f"[START_INTERVIEW] Interview {interview_id} is now in_progress")
 
         return InterviewModel(**result)
 
+   
     async def end_interview(self, interview_id: str, db) -> InterviewModel:
         """
-        End interview session and trigger evaluation.
-        Handles:
-        - Normal evaluation
-        - Zero-answer evaluation (prevents infinite 404 loop)
+        Ends interview, stops agent, evaluates using Groq, 
+        and ALWAYS stores evaluation (no more 404).
         """
         import logging
+        from pydantic import ValidationError
+
         logger = logging.getLogger(__name__)
 
         interview = await db.interviews.find_one({"_id": ObjectId(interview_id)})
@@ -194,7 +227,7 @@ class InterviewEngineService:
 
         logger.info(f"🏁 Ending interview {interview_id}")
 
-        # --- Stop AI Agent ---
+        # Stop agent
         if interview.get("agent_id"):
             try:
                 await self.videosdk.stop_agent(interview["agent_id"])
@@ -202,7 +235,7 @@ class InterviewEngineService:
             except Exception as e:
                 logger.warning(f"⚠️ Failed to stop agent: {e}")
 
-        # --- End VideoSDK Meeting ---
+        # End meeting
         if interview.get("session_id"):
             try:
                 await self.videosdk.end_meeting(interview["session_id"])
@@ -210,27 +243,21 @@ class InterviewEngineService:
             except Exception as e:
                 logger.warning(f"⚠️ Failed to end meeting: {e}")
 
-        # ----------------------------
-        # FETCH EXISTING CONVERSATION
-        # ----------------------------
-        existing_conversation = interview.get("conversation", [])
+        # Conversation
+        conversation = interview.get("conversation", [])
+        ai_msgs = [m for m in conversation if m["speaker"] == "ai"]
+        cand_msgs = [m for m in conversation if m["speaker"] == "candidate"]
 
-        logger.info(f"📊 Messages in DB: {len(existing_conversation)}")
+        logger.info(f"📊 Messages in DB: {len(conversation)}")
+        logger.info(f"   AI msgs: {len(ai_msgs)}")
+        logger.info(f"   Candidate msgs: {len(cand_msgs)}")
 
-        ai_messages = [m for m in existing_conversation if m.get("speaker") == "ai"]
-        candidate_messages = [m for m in existing_conversation if m.get("speaker") == "candidate"]
-
-        logger.info(f"   AI msgs: {len(ai_messages)}")
-        logger.info(f"   Candidate msgs: {len(candidate_messages)}")
-
-        # ===============================================================
-        # 🔥 ZERO-ANSWER CASE — PREVENT INFINITE 404 LOOP
-        # ===============================================================
-        if len(candidate_messages) == 0:
-            logger.warning("⚠️ No candidate answers — creating ZERO evaluation immediately")
+        # ZERO ANSWER CASE
+        if len(cand_msgs) == 0:
+            logger.warning("⚠️ Zero candidate responses — saving zero-evaluation")
 
             zero_eval = {
-                "skipped_interview": True,  # <-- NEW FLAG
+                "skipped_interview": True,
                 "scores": {
                     "overall_score": 0,
                     "technical_score": 0,
@@ -238,11 +265,7 @@ class InterviewEngineService:
                     "confidence_score": 0,
                     "behavioral_score": 0,
                 },
-                "sentiment": {
-                    "positive": 0.0,
-                    "neutral": 1.0,
-                    "negative": 0.0,
-                },
+                "sentiment": {"positive": 0.0, "neutral": 1.0, "negative": 0.0},
                 "strengths": [],
                 "improvements": ["Candidate did not answer any questions."],
                 "detailed_feedback": "Interview ended without any candidate responses.",
@@ -262,35 +285,29 @@ class InterviewEngineService:
                 }
             )
 
-            logger.info("✅ Zero-answer evaluation stored successfully")
-
-            # Reload interview
             interview = await db.interviews.find_one({"_id": ObjectId(interview_id)})
             return InterviewModel(**interview)
 
-        # ===============================================================
-        # NORMAL EVALUATION (IF USER ANSWERED AT LEAST 1 QUESTION)
-        # ===============================================================
+        # NORMAL EVALUATION
         evaluation = None
         try:
-            logger.info("🤖 Running AI evaluation...")
-
-            conversation = [ConversationMessage(**msg) for msg in existing_conversation]
+            conversation_objs = [ConversationMessage(**m) for m in conversation]
             questions = [Question(**q) for q in interview.get("questions", [])]
 
+            logger.info("🤖 Running AI evaluation...")
+
             evaluation = await self.evaluation_service.evaluate_interview(
-                conversation=conversation,
+                conversation=conversation_objs,
                 questions=questions,
-                interview_type=interview.get("interview_type", "mixed"),
-                difficulty=interview.get("difficulty", "medium"),
+                interview_type=interview["interview_type"],
+                difficulty=interview["difficulty"],
             )
 
-            logger.info("✅ AI evaluation finished.")
+            logger.info("✅ AI evaluation finished")
 
         except Exception as e:
             logger.error(f"❌ Evaluation failed: {e}")
 
-        # --- Prepare update data ---
         update_data = {
             "status": "completed",
             "end_time": end_time,
@@ -298,8 +315,15 @@ class InterviewEngineService:
             "updated_at": datetime.utcnow(),
         }
 
+        # Store evaluation with VALIDATION fallback
         if evaluation:
-            update_data["evaluation"] = evaluation.model_dump()
+            try:
+                validated = Evaluation(**evaluation.model_dump())
+                update_data["evaluation"] = validated.model_dump()
+                logger.info("✅ Evaluation validated and stored")
+            except ValidationError as ve:
+                logger.error(f"❌ Evaluation structure mismatch, saving raw eval: {ve}")
+                update_data["evaluation"] = evaluation.model_dump()
 
         updated = await db.interviews.find_one_and_update(
             {"_id": ObjectId(interview_id)},
@@ -307,7 +331,6 @@ class InterviewEngineService:
             return_document=True,
         )
 
-        logger.info(f"✅ Interview {interview_id} completed and saved")
         return InterviewModel(**updated)
 
     async def add_message(
@@ -334,10 +357,6 @@ class InterviewEngineService:
         Simulate a complete interview conversation using Groq AI.
         Fallback when VideoSDK agent is not available.
         """
-        import logging
-
-        logger = logging.getLogger(__name__)
-
         interview = await db.interviews.find_one({"_id": ObjectId(interview_id)})
         if not interview:
             raise ValueError("Interview not found")
@@ -455,9 +474,7 @@ class InterviewEngineService:
             return response.choices[0].message.content
 
         except Exception as e:
-            import logging
-
-            logging.getLogger(__name__).error(f"Failed to generate answer: {e}")
+            logger.error(f"Failed to generate answer: {e}")
             return (
                 "I would approach this by breaking down the requirements and applying "
                 "best practices to deliver an effective solution."
@@ -468,10 +485,7 @@ class InterviewEngineService:
         Generate AI interviewer reply to candidate's message
         Now with DYNAMIC question generation!
         """
-        import logging
         from app.core.config import settings
-
-        logger = logging.getLogger(__name__)
 
         interview = await db.interviews.find_one({"_id": ObjectId(interview_id)})
         if not interview:
@@ -499,7 +513,6 @@ class InterviewEngineService:
                 ]
 
                 import random
-
                 ack = random.choice(acknowledgments)
 
                 return f"{ack} {next_question.question_text}"
@@ -518,10 +531,7 @@ class InterviewEngineService:
         - Previous Q&A
         - Interview type and difficulty
         """
-        import logging
         from app.core.config import settings
-
-        logger = logging.getLogger(__name__)
 
         interview = await db.interviews.find_one({"_id": ObjectId(interview_id)})
         if not interview:
@@ -563,12 +573,14 @@ class InterviewEngineService:
         # Generate question using Groq
         if not settings.GROQ_API_KEY:
             # Fallback question
-            return Question(
+            fallback_question = Question(
                 question_text=f"Tell me more about your experience with the skills mentioned in your resume.",
                 category=interview_type,
                 difficulty=difficulty,
                 expected_topics=parsed_resume.skills[:3] if parsed_resume.skills else [],
             )
+            await self._save_question_to_db(interview_id, fallback_question, db)
+            return fallback_question
 
         try:
             from groq import Groq
@@ -582,7 +594,7 @@ class InterviewEngineService:
                         "role": "system",
                         "content": """You are an expert technical interviewer. Generate ONE interview question based on the context provided. 
 
-Return ONLY valid JSON (no markdown, no extra text):
+Return ONLY valid JSON in this exact format (no markdown, no extra text):
 {
   "question_text": "Your question here",
   "category": "technical|behavioral|hr",
@@ -598,39 +610,46 @@ Return ONLY valid JSON (no markdown, no extra text):
 
             response_text = response.choices[0].message.content.strip()
 
-            # Clean JSON
-            if response_text.startswith("json"):
-                response_text = response_text[7:]
-            if response_text.startswith(""): 
-                response_text = response_text[3:] 
-            if response_text.endswith(""):
-                response_text = response_text[:-3]
-            response_text = response_text.strip()
+            # 🔥 FIXED JSON EXTRACTION - Use the imported utility
+            logger.info(f"Raw Groq response: {repr(response_text[:100])}...")
+            
+            # Method 1: Use extract_single_json utility (most robust)
+            try:
+                json_data = extract_single_json(response_text)
+                logger.info("✅ JSON extracted using extract_single_json")
+            except:
+                # Method 2: Regex fallback for markdown-wrapped JSON
+                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                    json_data = json.loads(json_str)
+                    logger.info("✅ JSON extracted using regex fallback")
+                else:
+                    raise ValueError("No valid JSON found")
 
-            import json
-
-            data = json.loads(response_text)
+            # Validate required fields
+            required_fields = ["question_text", "category", "difficulty", "expected_topics"]
+            for field in required_fields:
+                if field not in json_data:
+                    raise ValueError(f"Missing required field: {field}")
 
             question = Question(
-                question_text=data.get("question_text", ""),
-                category=data.get("category", interview_type),
-                difficulty=data.get("difficulty", difficulty),
-                expected_topics=data.get("expected_topics", []),
+                question_text=json_data["question_text"],
+                category=json_data["category"],
+                difficulty=json_data["difficulty"],
+                expected_topics=json_data.get("expected_topics", []),
             )
 
             # Save question to interview
-            await db.interviews.update_one(
-                {"_id": ObjectId(interview_id)},
-                {"$push": {"questions": question.model_dump()}, "$set": {"updated_at": datetime.utcnow()}},
-            )
+            await self._save_question_to_db(interview_id, question, db)
 
-            logger.info(f"✅ Generated dynamic question #{current_count + 1} for interview {interview_id}")
+            logger.info(f"✅ Generated dynamic question #{current_count + 1}: {question.question_text[:50]}...")
             return question
 
         except Exception as e:
-            logger.error(f"Failed to generate dynamic question: {e}")
-
-            # Fallback
+            logger.error(f"❌ Failed to generate dynamic question: {e}")
+            
+            # Fallback question
             fallback_question = Question(
                 question_text=f"Can you elaborate on your experience mentioned in your resume?",
                 category=interview_type,
@@ -638,12 +657,16 @@ Return ONLY valid JSON (no markdown, no extra text):
                 expected_topics=[],
             )
 
-            await db.interviews.update_one(
-                {"_id": ObjectId(interview_id)},
-                {"$push": {"questions": fallback_question.model_dump()}, "$set": {"updated_at": datetime.utcnow()}},
-            )
-
+            await self._save_question_to_db(interview_id, fallback_question, db)
+            logger.info(f"✅ Used fallback question #{current_count + 1}")
             return fallback_question
+
+    async def _save_question_to_db(self, interview_id: str, question: Question, db):
+        """Helper method to save question to database"""
+        await db.interviews.update_one(
+            {"_id": ObjectId(interview_id)},
+            {"$push": {"questions": question.model_dump()}, "$set": {"updated_at": datetime.utcnow()}},
+        )
 
     def _build_dynamic_question_context(
         self,
@@ -690,7 +713,8 @@ Return ONLY valid JSON (no markdown, no extra text):
             recent_conv = conversation[-(min(8, len(conversation))):]
             for msg in recent_conv:
                 speaker = "INTERVIEWER" if msg["speaker"] == "ai" else "CANDIDATE"
-                context_parts.append(f"{speaker}: {msg['text']}")
+                text_preview = msg['text'][:100] + "..." if len(msg['text']) > 100 else msg['text']
+                context_parts.append(f"{speaker}: {text_preview}")
             context_parts.append("")
 
         # Instructions

@@ -166,19 +166,16 @@ async def get_interview(
 
 
 
-# --------------------------------------------------------
-# Start Interview
-# --------------------------------------------------------
 @router.post("/{interview_id}/start")
 async def start_interview(
     interview_id: str,
     current_user: UserModel = Depends(get_current_user),
     db=Depends(get_database),
 ):
-    """
-    Start the interview — activate the AI agent (if applicable) and set status to in_progress.
-    """
+    logger.info(f"[API][START_INTERVIEW] Request to start interview {interview_id}")
+
     if not ObjectId.is_valid(interview_id):
+        logger.warning(f"[API][START_INTERVIEW] Invalid interview ID format: {interview_id}")
         raise HTTPException(status_code=400, detail="Invalid interview ID")
 
     interview = await db.interviews.find_one(
@@ -186,13 +183,49 @@ async def start_interview(
     )
 
     if not interview:
+        logger.warning(f"[API][START_INTERVIEW] Interview not found or not owned: {interview_id}")
         raise HTTPException(status_code=404, detail="Interview not found")
 
     if interview.get("status") != "created":
-        raise HTTPException(status_code=400, detail=f"Interview already {interview.get('status')}")
+        logger.warning(
+            f"[API][START_INTERVIEW] Interview {interview_id} already in state {interview.get('status')}"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Interview already {interview.get('status')}"
+        )
 
+    # --------------------------------------------------------
+    # CALL ENGINE
+    # --------------------------------------------------------
     try:
+        logger.info(f"[API][START_INTERVIEW] Calling engine.start_interview for {interview_id}")
         updated = await interview_engine.start_interview(interview_id, db)
+
+        # Ensure not None
+        if not updated:
+            logger.error(
+                f"[API][START_INTERVIEW] Engine returned None. Fetching fallback from DB."
+            )
+            fallback_doc = await db.interviews.find_one({"_id": ObjectId(interview_id)})
+            if not fallback_doc:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Interview started but DB returned no document"
+                )
+
+            return {
+                "message": "Interview started (fallback)",
+                "interview_id": str(fallback_doc["_id"]),
+                "status": fallback_doc.get("status"),
+                "start_time": fallback_doc.get("start_time"),
+                "session_id": fallback_doc.get("session_id"),
+                "agent_id": fallback_doc.get("agent_id"),
+            }
+
+        # Normal success
+        logger.info(f"[API][START_INTERVIEW] Interview {interview_id} started successfully")
+
         return {
             "message": "Interview started",
             "interview_id": str(updated.id),
@@ -201,9 +234,11 @@ async def start_interview(
             "session_id": updated.session_id,
             "agent_id": updated.agent_id,
         }
+
     except Exception as e:
-        logger.exception("Failed to start interview")
+        logger.exception(f"[API][START_INTERVIEW] FAILED: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start interview: {e}")
+
 
 
 # --------------------------------------------------------
