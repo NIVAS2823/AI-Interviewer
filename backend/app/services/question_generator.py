@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional
 from groq import Groq
 from app.core.config import settings
 from app.models.interview import Question
@@ -21,20 +21,27 @@ class QuestionGeneratorService:
         else:
             logger.warning("⚠️ No GROQ_API_KEY found — using fallback questions")
 
+    # ----------------------------------------------------------
+    # UPDATED SIGNATURE: supports asked_questions + conversation
+    # ----------------------------------------------------------
     async def generate_questions(
         self,
         parsed_resume: ParsedData,
         interview_type: str,
         difficulty: str,
-        max_questions: int
+        max_questions: int,
+        asked_questions: Optional[List[str]] = None,
+        conversation_history: Optional[List] = None,
     ) -> List[Question]:
-        """
-        Generate interview questions based on resume
-        """
+        """Generate interview questions with de-dupe support"""
+
+        asked_questions = asked_questions or []
+        conversation_history = conversation_history or []
 
         if not self.client or not settings.GROQ_API_KEY:
             logger.warning("⚠️ Groq disabled — using template questions")
-            return self._generate_template_questions(interview_type, max_questions)
+            questions = self._generate_template_questions(interview_type, max_questions)
+            return self._filter_duplicates(questions, asked_questions)
 
         try:
             context = self._build_resume_context(parsed_resume)
@@ -50,12 +57,44 @@ class QuestionGeneratorService:
                 max_questions
             )
 
-            logger.info(f"✓ Generated {len(questions)} questions using Groq AI")
+            # 🔥 Remove duplicates using asked_questions + conversation
+            questions = self._filter_duplicates(questions, asked_questions)
+
             return questions
 
         except Exception as e:
             logger.error(f"❌ Question generation error: {e}")
-            return self._generate_template_questions(interview_type, max_questions)
+            fallback = self._generate_template_questions(interview_type, max_questions)
+            return self._filter_duplicates(fallback, asked_questions)
+
+    # ----------------------------------------------------------
+    # NEW: Deduplication logic
+    # ----------------------------------------------------------
+    def _filter_duplicates(
+        self, 
+        questions: List[Question], 
+        asked_questions: List[str]
+    ) -> List[Question]:
+        """Remove exact & approximate duplicates."""
+        clean = []
+
+        for q in questions:
+            qtext = q.question_text.strip().lower()
+
+            # Exact repeat?
+            if qtext in [x.lower() for x in asked_questions]:
+                logger.info(f"⛔ Skipping duplicate question: {qtext[:80]}")
+                continue
+
+            # Approximate repeat (first 6 words match)
+            for asked in asked_questions:
+                if " ".join(qtext.split()[:6]) == " ".join(asked.lower().split()[:6]):
+                    logger.info(f"⛔ Skipping near-duplicate question: {qtext[:80]}")
+                    break
+            else:
+                clean.append(q)
+
+        return clean
 
     def _build_resume_context(self, resume: ParsedData) -> str:
         """Build context from resume"""

@@ -2,7 +2,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { useAuthStore } from './store/authStore';
-
+import TestAudio from './test/TestAudio';
 // Layout
 import Layout from './components/Layout';
 
@@ -17,6 +17,7 @@ import Interviews from './pages/Interviews';
 import InterviewNew from './pages/InterviewNew';
 import InterviewDetail from './pages/InterviewDetail';
 import InterviewRoom from './pages/InterviewRoom';
+import VoiceInterviewRoom from './pages/VoiceInterviewRoom';
 
 // Protected Route Component
 function ProtectedRoute({ children }) {
@@ -55,6 +56,7 @@ function App() {
       <Routes>
         {/* Public */}
         <Route path="/" element={<Landing />} />
+        <Route path="/test-audio" element={<TestAudio />} />
         <Route
           path="/login"
           element={
@@ -138,6 +140,14 @@ function App() {
           element={
             <ProtectedRoute>
               <InterviewRoom />
+            </ProtectedRoute>
+          }
+        />
+         <Route
+          path="/interviews/:id/voice"
+          element={
+            <ProtectedRoute>
+              <VoiceInterviewRoom />
             </ProtectedRoute>
           }
         />

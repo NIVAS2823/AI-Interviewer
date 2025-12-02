@@ -12,8 +12,6 @@ import { formatDate } from "../lib/utils";
 import toast from "react-hot-toast";
 import { Link } from "react-router-dom";
 
-
-
 export default function Resumes() {
   const [resumes, setResumes] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -26,8 +24,9 @@ export default function Resumes() {
   const [confirmText, setConfirmText] = useState("");
   const [confirmAction, setConfirmAction] = useState(null);
 
-
-
+  /* -------------------------------------------------------------- */
+  /*                     LOAD RESUMES (API CALL)                    */
+  /* -------------------------------------------------------------- */
   const loadResumes = async () => {
     try {
       const response = await resumeAPI.list();
@@ -45,23 +44,33 @@ export default function Resumes() {
     }
   };
 
-  // Auto-refresh every 3s until parsing is completed
+  /* -------------------------------------------------------------- */
+  /*                     FIXED POLLING + INITIAL LOAD               */
+  /* -------------------------------------------------------------- */
+
+  // Load once on mount
   useEffect(() => {
     loadResumes();
+  }, []);
+
+  // Poll only when items are still processing
+  useEffect(() => {
+    const stillProcessing = resumes.some(
+      (r) => r.parsing_status === "processing"
+    );
+
+    if (!stillProcessing) return;
 
     const interval = setInterval(() => {
-      const stillProcessing = resumes.some(
-        (r) => r.parsing_status === "processing"
-      );
-      if (stillProcessing) loadResumes();
+      loadResumes();
     }, 3000);
 
     return () => clearInterval(interval);
   }, [resumes]);
 
-  /* ------------------------------------------------------------------ */
-  /*                             UPLOAD                                 */
-  /* ------------------------------------------------------------------ */
+  /* -------------------------------------------------------------- */
+  /*                           UPLOAD                               */
+  /* -------------------------------------------------------------- */
 
   const handleUpload = async (e) => {
     const file = e.target.files?.[0];
@@ -94,9 +103,9 @@ export default function Resumes() {
     }
   };
 
-  /* ------------------------------------------------------------------ */
-  /*                           DELETE RESUME                            */
-  /* ------------------------------------------------------------------ */
+  /* -------------------------------------------------------------- */
+  /*                        DELETE RESUME                           */
+  /* -------------------------------------------------------------- */
 
   const handleDeleteConfirmed = async (id) => {
     try {
@@ -117,9 +126,9 @@ export default function Resumes() {
     setConfirmOpen(true);
   };
 
-  /* ------------------------------------------------------------------ */
-  /*                             RENDER                                 */
-  /* ------------------------------------------------------------------ */
+  /* -------------------------------------------------------------- */
+  /*                           RENDER                               */
+  /* -------------------------------------------------------------- */
 
   if (loading) {
     return (

@@ -1,88 +1,57 @@
-# ============================
-# ⚡ FastAPI Framework
-# ============================
+# FastAPI Framework
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
 
-# ============================
-# 🗄️ Database
-# ============================
+# Database
 motor==3.3.2
 pymongo==4.6.0
 redis==5.0.1
 
-# ============================
-# 🔐 Authentication & Security
-# ============================
+# Authentication & Security
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-dotenv==1.0.0
 
-# ============================
-# 🧩 Validation & Serialization
-# ============================
+# Validation & Serialization
 pydantic==2.5.0
 pydantic-settings==2.1.0
 email-validator==2.1.0
 
-# ============================
-# 🌐 HTTP Client & WebSockets
-# ============================
+# HTTP Client & WebSockets
 httpx==0.25.2
 aiofiles==23.2.1
 websockets==12.0
 
-# ============================
-# 📄 PDF Processing
-# ============================
+# PDF Processing
 PyPDF2==3.0.1
 pdfplumber==0.10.3
 
-# ============================
-# 🔐 JWT
-# ============================
+# JWT
 PyJWT==2.8.0
 
-# ============================
-# 🤖 AI/LLM
-# ============================
+# AI / LLM
 groq==0.5.0
 
-# ============================
-# ☁️ Cloud Storage (S3/R2)
-# ============================
+# Cloud Storage
 boto3==1.34.10
 python-magic==0.4.27
 
-# ============================
-# 🎙️ Speech Services
-# ============================
-# Deepgram STT
+# Speech Services
 deepgram-sdk==3.2.7
-
-# Azure TTS
 azure-cognitiveservices-speech==1.38.0
-
-# Audio Processing
 pydub==0.25.1
 numpy==2.1.0
 soundfile==0.12.1
 
-# ============================
-# 🧪 Testing
-# ============================
+# Testing
 pytest==7.4.3
 pytest-asyncio==0.21.1
 pytest-cov==4.1.0
 
-# ============================
-# 📈 Monitoring
-# ============================
+# Monitoring
 sentry-sdk[fastapi]==1.38.0
 
-# ============================
-# 🌍 CORS
-# ============================
+# CORS
 fastapi-cors==0.0.6

@@ -154,6 +154,7 @@ export default function InterviewDetail() {
       <HeaderSection
         interview={interview}
         id={id}
+        navigate = {navigate}
         handleSimulate={handleSimulate}
         handleEnd={handleEnd}
       />
@@ -211,7 +212,7 @@ export default function InterviewDetail() {
 /*                               SUB COMPONENTS                            */
 /* ====================================================================== */
 
-function HeaderSection({ interview, id, handleSimulate, handleEnd }) {
+function HeaderSection({ interview, id, navigate,handleSimulate, handleEnd }) {
   return (
     <div className="flex items-start justify-between">
       <div>
@@ -234,6 +235,14 @@ function HeaderSection({ interview, id, handleSimulate, handleEnd }) {
             >
               <PlayCircle className="w-4 h-4 mr-2" /> Join Interview
             </Link>
+
+            <button
+  onClick={() => navigate(`/interviews/${id}/voice`)}
+  className="btn btn-primary"
+  disabled={interview.status === 'completed'}
+>
+  🎤 Start Voice Interview
+</button>
 
             <button
               onClick={handleSimulate}

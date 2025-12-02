@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from bson import ObjectId
 from typing import Dict
 import logging
-import datetime
+from datetime import datetime as dt  # <-- FIXED
 
 from app.models.user import UserModel
 from app.models.interview import Evaluation
@@ -54,7 +54,7 @@ async def get_evaluation(
         try:
             return Evaluation(**evaluation)
         except Exception:
-            # Stored eval corrupted → recover by wrapping into schema
+            # Stored eval corrupted → recover by wrapping
             logger.error("Corrupted evaluation, repairing...")
             safe = Evaluation(
                 scores=evaluation.get("scores", {}),
@@ -70,7 +70,9 @@ async def get_evaluation(
     # CASE 2: Interview completed but evaluation missing → FIX
     # -------------------------------------------------------
     if status_flag == "completed":
-        logger.warning(f"Missing evaluation for completed interview {interview_id}, creating fallback zero-eval.")
+        logger.warning(
+            f"Missing evaluation for completed interview {interview_id}, creating fallback zero-eval."
+        )
 
         zero_eval = {
             "scores": {
@@ -87,11 +89,11 @@ async def get_evaluation(
             "question_scores": [],
         }
 
-        # Save fallback immediately
+        # Persist fallback evaluation
         try:
             await db.interviews.update_one(
                 {"_id": ObjectId(interview_id)},
-                {"$set": {"evaluation": zero_eval, "updated_at": datetime.utcnow()}}
+                {"$set": {"evaluation": zero_eval, "updated_at": dt.utcnow()}}  # <-- FIXED
             )
         except Exception:
             logger.exception("Failed to persist fallback evaluation")
@@ -115,7 +117,6 @@ async def evaluate_single_answer(
     """
     Real-time single question-answer evaluation.
     """
-
     result = await evaluation_service.evaluate_single_answer(
         question=request.question,
         answer=request.answer,
