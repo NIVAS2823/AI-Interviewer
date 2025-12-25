@@ -37,6 +37,14 @@ class Project(BaseModel):
     url: Optional[str] = None
 
 
+class Skills(BaseModel):
+    keywords: List[str] = []
+    technical: List[str] = []
+    soft: List[str] = []
+    tools: List[str] = []
+    ats_top_matches: List[str] = []
+    keyword_density_score: float = 0.0
+
 # -----------------------------
 # ParsedData (AI Output)
 # -----------------------------
@@ -46,7 +54,7 @@ class ParsedData(BaseModel):
     phone: Optional[str] = None
     summary: Optional[str] = None
 
-    skills: Optional[List[str]] = []
+    skills: Skills = Skills()
     experience: Optional[List[WorkExperience]] = []
     education: Optional[List[Education]] = []
     certifications: Optional[List[str]] = []

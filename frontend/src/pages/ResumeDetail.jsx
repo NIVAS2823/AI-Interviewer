@@ -47,10 +47,11 @@ export default function ResumeDetail() {
   if (!resume) return null;
 
   const { parsed_data } = resume;
+  const skills = parsed_data?.skills || {};
 
   return (
     <div className="space-y-10 text-gray-200">
-      {/* BACK BUTTON */}
+      {/* BACK */}
       <Link
         to="/resumes"
         className="inline-flex items-center text-gray-400 hover:text-neon-primary transition mb-2"
@@ -90,6 +91,7 @@ export default function ResumeDetail() {
       {/* PARSED DATA */}
       {parsed_data ? (
         <div className="grid gap-6">
+
           {/* PERSONAL INFO */}
           {(parsed_data.name ||
             parsed_data.email ||
@@ -126,24 +128,36 @@ export default function ResumeDetail() {
             </div>
           )}
 
-          {/* SKILLS */}
-          {parsed_data.skills?.length > 0 && (
+          {/* SKILLS BLOCK (NEW STRUCTURE) */}
+          {(skills.keywords?.length ||
+            skills.technical?.length ||
+            skills.soft?.length ||
+            skills.tools?.length) > 0 && (
             <div className="bg-darkbg-card border border-white/10 p-6 rounded-xl shadow">
               <div className="flex items-center space-x-2 mb-4">
                 <Code className="w-5 h-5 text-neon-primary" />
                 <h2 className="text-xl font-bold text-neon-primary">Skills</h2>
               </div>
 
-              <div className="flex flex-wrap gap-2">
-                {parsed_data.skills.map((skill, i) => (
-                  <span
-                    key={i}
-                    className="px-3 py-1 bg-white/10 border border-neon-primary/40 text-neon-primary rounded-full text-sm shadow-[0_0_10px_var(--neon-primary)]"
-                  >
-                    {skill}
-                  </span>
-                ))}
-              </div>
+              {/* KEYWORDS */}
+              {skills.keywords?.length > 0 && (
+                <Section title="Keywords" items={skills.keywords} />
+              )}
+
+              {/* TECHNICAL */}
+              {skills.technical?.length > 0 && (
+                <Section title="Technical Skills" items={skills.technical} />
+              )}
+
+              {/* SOFT */}
+              {skills.soft?.length > 0 && (
+                <Section title="Soft Skills" items={skills.soft} />
+              )}
+
+              {/* TOOLS */}
+              {skills.tools?.length > 0 && (
+                <Section title="Tools" items={skills.tools} />
+              )}
             </div>
           )}
 
@@ -156,7 +170,6 @@ export default function ResumeDetail() {
                   Experience
                 </h2>
               </div>
-
               {parsed_data.experience.map((exp, i) => (
                 <div
                   key={i}
@@ -179,7 +192,6 @@ export default function ResumeDetail() {
                   Education
                 </h2>
               </div>
-
               {parsed_data.education.map((edu, i) => (
                 <div key={i} className="mb-4">
                   <h3 className="font-semibold text-white">
@@ -200,7 +212,6 @@ export default function ResumeDetail() {
                   Certifications
                 </h2>
               </div>
-
               <ul className="list-disc ml-5 text-gray-300">
                 {parsed_data.certifications.map((cert, i) => (
                   <li key={i}>{cert}</li>
@@ -212,6 +223,25 @@ export default function ResumeDetail() {
       ) : (
         <div className="text-center text-gray-500">Resume not parsed yet.</div>
       )}
+    </div>
+  );
+}
+
+/* Helper Section Component */
+function Section({ title, items }) {
+  return (
+    <div className="mb-4">
+      <h4 className="font-semibold text-neon-primary mb-2">{title}</h4>
+      <div className="flex flex-wrap gap-2">
+        {items.map((item, i) => (
+          <span
+            key={i}
+            className="px-3 py-1 bg-white/10 border border-neon-primary/40 text-neon-primary rounded-full text-sm shadow-[0_0_8px_var(--neon-primary)]"
+          >
+            {item}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

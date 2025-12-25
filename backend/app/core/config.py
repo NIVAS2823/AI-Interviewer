@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     VIDEOSDK_WEBHOOK_SECRET: str = ""
     VIDEOSDK_API_URL: str = "https://api.videosdk.live/v2"
 
+    #LangSmith
+    LANGSMITH_API_KEY: str = ""
+    LANGSMITH_TRACING: str = ""
+    LANGSMITH_PROJECT: str = ""
+
 
      # Agent Worker
     AGENT_WORKER_URL: str = "http://agent_worker:9000"

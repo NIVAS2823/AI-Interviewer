@@ -40,7 +40,7 @@ python-magic==0.4.27
 
 # Speech Services
 deepgram-sdk==3.2.7
-azure-cognitiveservices-speech==1.38.0
+
 pydub==0.25.1
 numpy==2.1.0
 soundfile==0.12.1

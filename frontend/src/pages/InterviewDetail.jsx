@@ -255,7 +255,7 @@ function HeaderSection({ interview, id, navigate,handleSimulate, handleEnd }) {
 
         {interview.status === "in_progress" && (
           <Link
-            to={`/interviews/${id}/room`}
+            to={`/interviews/${id}/voice`}
             className="px-5 py-2 rounded-lg bg-neon-primary text-black font-semibold animate-pulse flex items-center shadow"
           >
             <PlayCircle className="w-4 h-4 mr-2" /> Rejoin Interview

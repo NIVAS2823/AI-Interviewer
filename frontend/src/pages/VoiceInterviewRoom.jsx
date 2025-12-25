@@ -11,23 +11,13 @@ import {
   ArrowLeft,
   Clock,
   MessageSquare,
-  CheckCircle,
-  XCircle,
   ChevronUp,
 } from "lucide-react";
 import toast from "react-hot-toast";
 
-/**
- * VoiceInterviewRoom.jsx
- * - Neon-themed, responsive layout matching InterviewRoom.jsx
- * - Hybrid layout: avatar + message area (scrollable), mic fixed in bottom bar
- * - Desktop: right sidebar with Current Question + Tips (static)
- * - Mobile: same right content available in a bottom drawer
- * - No conversation history panel (removed)
- * - Neon confirm modal for ending interview
- *
- * NOTE: Keep your existing audio/ws implementations; import paths assumed.
- */
+
+const MAX_ANSWER_DURATION = 90; // 60 seconds max
+const WARNING_TIME = 50; // Show warning at 50 seconds
 
 export default function VoiceInterviewRoom() {
   const { id } = useParams();
@@ -41,9 +31,23 @@ export default function VoiceInterviewRoom() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [transcript, setTranscript] = useState("");
   const [currentMessage, setCurrentMessage] = useState("");
-  const [questionProgress, setQuestionProgress] = useState({ current: 0, total: 0 });
+  const [questionProgress, setQuestionProgress] = useState({
+    current: 0,
+    total: 0,
+  });
   const [elapsedTime, setElapsedTime] = useState(0);
   const [startTime] = useState(Date.now());
+
+  // 🔥 Recording timer state
+  const [recordingTimer, setRecordingTimer] = useState(null);
+  const [recordingTimeLeft, setRecordingTimeLeft] = useState(
+    MAX_ANSWER_DURATION
+  );
+
+  // 🔥 Processing indicator state
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [processingMessage, setProcessingMessage] = useState("");
+  const isProcessingRef = useRef(false);
 
   // UI state
   const [drawerOpen, setDrawerOpen] = useState(false); // mobile drawer for question & tips
@@ -91,7 +95,10 @@ export default function VoiceInterviewRoom() {
     if (transcript) {
       // scroll main panel down so user sees transcript
       requestAnimationFrame(() => {
-        mainPanelRef.current?.scrollIntoView?.({ behavior: "smooth", block: "end" });
+        mainPanelRef.current?.scrollIntoView?.({
+          behavior: "smooth",
+          block: "end",
+        });
       });
     }
   }, [transcript, currentMessage]);
@@ -193,6 +200,53 @@ export default function VoiceInterviewRoom() {
   };
 
   // -----------------------
+  // Send audio with processing indicator
+  // -----------------------
+  const sendAudioToBackend = async (audioBlob) => {
+    try {
+      setIsProcessing(true);
+      isProcessingRef.current = true;
+      setProcessingMessage("Processing your answer...");
+
+      console.log(`📤 Sending audio: ${audioBlob.size} bytes`);
+
+      // Prefer VoiceInterviewClient.sendAudio if available
+      if (wsClientRef.current && wsClientRef.current.sendAudio) {
+        await wsClientRef.current.sendAudio(audioBlob);
+      } else if (
+        wsClientRef.current?.ws &&
+        wsClientRef.current.ws.readyState === WebSocket.OPEN
+      ) {
+        wsClientRef.current.ws.send(audioBlob);
+      } else {
+        throw new Error("WebSocket not connected");
+      }
+
+      // After 5 seconds, update message if still processing
+      setTimeout(() => {
+        if (isProcessingRef.current) {
+          setProcessingMessage("Transcribing your answer...");
+        }
+      }, 5000);
+
+      // After 15 seconds, show long-wait message
+      setTimeout(() => {
+        if (isProcessingRef.current) {
+          setProcessingMessage(
+            "This is taking longer than usual, please wait..."
+          );
+        }
+      }, 15000);
+    } catch (error) {
+      console.error("Failed to send audio:", error);
+      toast.error("Failed to send audio");
+      setIsProcessing(false);
+      isProcessingRef.current = false;
+      setProcessingMessage("");
+    }
+  };
+
+  // -----------------------
   // WS Message Handler
   // -----------------------
   const handleMessage = async (data) => {
@@ -207,6 +261,11 @@ export default function VoiceInterviewRoom() {
         break;
 
       case "transcription":
+        // 🔥 Hide processing indicator when transcript arrives
+        setIsProcessing(false);
+        isProcessingRef.current = false;
+        setProcessingMessage("");
+
         // update transcript (do not clear immediately to avoid flicker)
         setTranscript(data.text || "");
         break;
@@ -214,17 +273,27 @@ export default function VoiceInterviewRoom() {
       case "metadata":
         if (data.metadata) {
           setQuestionProgress({
-            current: data.metadata.question_number || questionProgress.current,
-            total: data.metadata.total_questions || questionProgress.total,
+            current:
+              data.metadata.question_number || questionProgress.current,
+            total:
+              data.metadata.total_questions || questionProgress.total,
           });
         }
         break;
 
       case "interview_complete":
+        setIsProcessing(false);
+        isProcessingRef.current = false;
+        setProcessingMessage("");
         handleInterviewComplete();
         break;
 
       case "error":
+        // 🔥 Hide processing on error
+        setIsProcessing(false);
+        isProcessingRef.current = false;
+        setProcessingMessage("");
+
         toast.error(data.message || "Speech recognition failed");
         break;
 
@@ -240,14 +309,18 @@ export default function VoiceInterviewRoom() {
     try {
       const text = data.text || "";
       setCurrentMessage(text);
+
       // update progress if present
       if (data.metadata) {
         setQuestionProgress({
-          current: data.metadata.question_number || questionProgress.current,
-          total: data.metadata.total_questions || questionProgress.total,
+          current:
+            data.metadata.question_number || questionProgress.current,
+          total:
+            data.metadata.total_questions || questionProgress.total,
         });
       }
 
+      // ----- AUDIO PLAYBACK -----
       if (data.audio && playerRef.current) {
         setIsSpeaking(true);
         try {
@@ -258,18 +331,25 @@ export default function VoiceInterviewRoom() {
           setIsSpeaking(false);
         }
 
-        // short delay before listening starts
+        // 👉 After greeting finishes playing, notify backend
+        if (data.type === "greeting") {
+          wsClientRef.current.ws.send(
+            JSON.stringify({ type: "greeting_ack" })
+          );
+          return; // do NOT start listening after greeting
+        }
+
+        // delay only for non-greeting messages
         await new Promise((r) => setTimeout(r, 400));
       }
 
-      // start listening for candidate answers after question/acknowledgment
+      // ----- START LISTENING AFTER QUESTION OR ACK -----
       if (data.type === "question" || data.type === "acknowledgment") {
-        // reset transcript before listening
         setTranscript("");
         await startListening();
       }
 
-      // if greeting or closing, we do not auto-start listening
+      // greeting + closing → no listening
     } catch (err) {
       console.error("handleAIMessage error:", err);
       setIsSpeaking(false);
@@ -277,7 +357,7 @@ export default function VoiceInterviewRoom() {
   };
 
   // -----------------------
-  // Listening controls
+  // Listening controls (with 60s auto-stop)
   // -----------------------
   const startListening = async () => {
     try {
@@ -285,33 +365,91 @@ export default function VoiceInterviewRoom() {
         toast.error("Recorder not available");
         return;
       }
+
+      // Don't start new recording if processing previous answer
+      if (isProcessingRef.current) {
+        toast.error("Still processing your previous answer...");
+        return;
+      }
+
+      // Avoid double-start
+      if (isListening) {
+        return;
+      }
+
       setTranscript("");
       setIsListening(true);
+      setRecordingTimeLeft(MAX_ANSWER_DURATION);
+
+      // Start audio recording
       await recorderRef.current.startRecording();
-      // scroll to bottom so user sees transcript
+
+      // 🔥 Start countdown timer
+      let timeLeft = MAX_ANSWER_DURATION;
+      const timerId = setInterval(() => {
+        timeLeft -= 1;
+        setRecordingTimeLeft(timeLeft);
+
+        // Warning at 50s
+        if (timeLeft === WARNING_TIME) {
+          console.log(`⚠️ ${WARNING_TIME} seconds left`);
+          // Optional toast:
+          // toast.warning(`${WARNING_TIME} seconds remaining`);
+        }
+
+        // Auto-stop at 60s
+        if (timeLeft <= 0) {
+          clearInterval(timerId);
+          setRecordingTimer(null);
+          console.log("⏱️ Maximum answer duration reached");
+          // Optional toast:
+          // toast.info("Answer time limit reached. Processing your response...");
+          // Auto-stop behaves like user pressing mic once
+          stopListening();
+        }
+      }, 1000);
+
+      setRecordingTimer(timerId);
+
+      // scroll to bottom so user sees transcript area
       requestAnimationFrame(() => {
-        mainPanelRef.current?.scrollIntoView?.({ behavior: "smooth", block: "end" });
+        mainPanelRef.current?.scrollIntoView?.({
+          behavior: "smooth",
+          block: "end",
+        });
       });
     } catch (err) {
       console.error("startListening error:", err);
       setIsListening(false);
+      if (recordingTimer) {
+        clearInterval(recordingTimer);
+        setRecordingTimer(null);
+      }
       toast.error("Cannot start recording");
     }
   };
 
   const stopListening = async () => {
     try {
-      setIsListening(false);
+      // 🔥 Clear timer
+      if (recordingTimer) {
+        clearInterval(recordingTimer);
+        setRecordingTimer(null);
+      }
+
       if (!recorderRef.current) {
         toast.error("Recorder not available");
+        setIsListening(false);
         return;
       }
+
+      setIsListening(false);
 
       const audioBlob = await recorderRef.current.stopRecording();
 
       if (audioBlob && audioBlob.size > 0) {
         try {
-          await wsClientRef.current?.sendAudio(audioBlob);
+          await sendAudioToBackend(audioBlob);
         } catch (err) {
           console.error("sendAudio failed:", err);
           toast.error("Failed to send audio");
@@ -382,6 +520,12 @@ export default function VoiceInterviewRoom() {
   // -----------------------
   const cleanup = async () => {
     try {
+      if (recordingTimer) {
+        clearInterval(recordingTimer);
+      }
+    } catch (e) {}
+
+    try {
       recorderRef.current?.cleanup?.();
     } catch (e) {}
     try {
@@ -406,7 +550,7 @@ export default function VoiceInterviewRoom() {
 
   if (loading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-darkbg">
+      <div className="h-screen flex flex-col items-center justify-center bg-darkbg">
         <Loader2 className="w-12 h-12 text-neon-primary animate-spin" />
         <p className="text-gray-400 mt-3">Initializing voice interview...</p>
       </div>
@@ -415,8 +559,10 @@ export default function VoiceInterviewRoom() {
 
   // defensive interviewData
   const currentCount = questionProgress.current || 0;
-  const maxCount = questionProgress.total || interviewData?.max_questions || 0;
-  const progressPercent = maxCount > 0 ? Math.round((currentCount / maxCount) * 100) : 0;
+  const maxCount =
+    questionProgress.total || interviewData?.max_questions || 0;
+  const progressPercent =
+    maxCount > 0 ? Math.round((currentCount / maxCount) * 100) : 0;
 
   return (
     <>
@@ -437,7 +583,8 @@ export default function VoiceInterviewRoom() {
                 Voice Interview
               </h1>
               <p className="text-xs text-gray-400 capitalize">
-                {interviewData?.interview_type?.replace("_", " ")} • {interviewData?.difficulty}
+                {interviewData?.interview_type?.replace("_", " ")} •{" "}
+                {interviewData?.difficulty}
               </p>
             </div>
           </div>
@@ -476,11 +623,16 @@ export default function VoiceInterviewRoom() {
           <div className="h-full grid grid-cols-1 lg:grid-cols-4 gap-6 p-5 min-h-0">
             {/* MAIN PANEL - left (hybrid InterviewRoom style) */}
             <section className="lg:col-span-3 flex flex-col bg-darkbg-card rounded-xl border border-white/6 shadow-2xl min-h-0 overflow-hidden">
-              <div className="flex-1 overflow-y-auto p-8 flex flex-col items-center" id="mainPanel">
+              <div
+                className="flex-1 overflow-y-auto p-8 flex flex-col items-center"
+                id="mainPanel"
+              >
                 {/* AI Avatar */}
                 <div
                   className={`w-48 h-48 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center mb-6 transition-all ${
-                    isSpeaking ? "scale-110 shadow-2xl shadow-blue-500/50" : "scale-100"
+                    isSpeaking
+                      ? "scale-110 shadow-2xl shadow-blue-500/50"
+                      : "scale-100"
                   }`}
                 >
                   <span className="text-6xl">🎤</span>
@@ -488,7 +640,9 @@ export default function VoiceInterviewRoom() {
 
                 {/* Status */}
                 <div className="text-center mb-6">
-                  <h2 className="text-2xl font-bold text-white mb-2">Sarah - AI Interviewer</h2>
+                  <h2 className="text-2xl font-bold text-white mb-2">
+                    Sarah - AI Interviewer
+                  </h2>
                   {isSpeaking && (
                     <div className="flex items-center justify-center space-x-2 text-blue-400">
                       <Volume2 className="w-5 h-5 animate-pulse" />
@@ -501,13 +655,23 @@ export default function VoiceInterviewRoom() {
                       <span>Listening...</span>
                     </div>
                   )}
-                  {!isSpeaking && !isListening && <div className="text-gray-400">Ready</div>}
+                  {!isSpeaking && !isListening && (
+                    <div className="text-gray-400">
+                      {connectionStatus === "connected"
+                        ? "Ready"
+                        : connectionStatus === "connecting"
+                        ? "Connecting..."
+                        : "Reconnecting..."}
+                    </div>
+                  )}
                 </div>
 
                 {/* Current Message */}
                 {currentMessage ? (
                   <div className="max-w-2xl bg-gray-700 rounded-2xl p-6 mb-4">
-                    <p className="text-gray-200 text-lg leading-relaxed">{currentMessage}</p>
+                    <p className="text-gray-200 text-lg leading-relaxed">
+                      {currentMessage}
+                    </p>
                   </div>
                 ) : (
                   <div className="max-w-2xl text-center text-gray-400 mb-4">
@@ -534,7 +698,9 @@ export default function VoiceInterviewRoom() {
                 <div className="flex items-center justify-between max-w-4xl mx-auto">
                   <div className="hidden md:flex items-center gap-4 text-sm text-gray-400">
                     <span>Press the mic to answer</span>
-                    <span className="px-2 py-1 rounded bg-white/5">Auto-stop + send</span>
+                    <span className="px-2 py-1 rounded bg-white/5">
+                      Auto-stop at 60s + send
+                    </span>
                   </div>
 
                   <div className="flex items-center gap-4">
@@ -550,7 +716,7 @@ export default function VoiceInterviewRoom() {
                     ) : (
                       <button
                         onClick={startListening}
-                        disabled={isSpeaking}
+                        disabled={isSpeaking || isProcessing}
                         className="w-16 h-16 rounded-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed flex items-center justify-center shadow-lg transition-all"
                         aria-label="Start recording"
                       >
@@ -558,34 +724,62 @@ export default function VoiceInterviewRoom() {
                       </button>
                     )}
 
+                    {/* Recording timer indicator */}
+                    {isListening && (
+                      <div className="flex items-center gap-2 ml-2 text-sm">
+                        <div className="animate-pulse h-3 w-3 bg-red-500 rounded-full" />
+                        <span className="text-gray-300">Recording</span>
+                        <span
+                          className={`ml-1 ${
+                            recordingTimeLeft <= 10
+                              ? "text-red-400 font-bold"
+                              : "text-gray-300"
+                          }`}
+                        >
+                          {recordingTimeLeft}s
+                        </span>
+                      </div>
+                    )}
+
                     {/* small status / progress */}
-                    <div className="text-right">
+                    <div className="text-right ml-4">
                       <div className="text-xs text-gray-400">Question</div>
-                      <div className="text-sm font-medium">{currentCount} / {maxCount}</div>
+                      <div className="text-sm font-medium">
+                        {currentCount} / {maxCount}
+                      </div>
                     </div>
                   </div>
                 </div>
 
                 <p className="text-center text-gray-500 text-xs mt-3">
-                  {isListening ? "Recording... Click mic to stop" : isSpeaking ? "AI is speaking..." : "Click mic to answer"}
+                  {isProcessing
+                    ? processingMessage || "Processing your answer..."
+                    : isListening
+                    ? "Recording... Click mic to stop"
+                    : isSpeaking
+                    ? "AI is speaking..."
+                    : "Click mic to answer"}
                 </p>
               </div>
             </section>
 
             {/* RIGHT SIDEBAR desktop-only: Current Question + Tips */}
             <aside className="hidden lg:flex flex-col space-y-6 h-full">
-              <div className="p-4 rounded-xl bg-[#07121a] border border-neon-primary/10 shadow-[0_0_20px_var(--neon-primary)/10]">
-                <div className="flex items-center justify-between mb-3">
+              {/* <div className="p-4 rounded-xl bg-[#07121a] border border-neon-primary/10 shadow-[0_0_20px_var(--neon-primary)/10]"> */}
+                {/* <div className="flex items-center justify-between mb-3">
                   <h3 className="text-neon-primary font-semibold flex items-center gap-2">
                     <MessageSquare className="w-4 h-4" /> Current Question
                   </h3>
-                  <div className="px-2 py-0.5 rounded-full bg-white/5 text-sm">{currentCount} / {maxCount}</div>
-                </div>
+                  <div className="px-2 py-0.5 rounded-full bg-white/5 text-sm">
+                    {currentCount} / {maxCount}
+                  </div>
+                </div> */}
 
-                <p className="text-sm text-gray-200 bg-white/5 p-3 rounded-lg leading-relaxed">
-                  {interviewData?.questions?.[currentCount - 1]?.question_text || "Waiting for next question..."}
+                {/* <p className="text-sm text-gray-200 bg-white/5 p-3 rounded-lg leading-relaxed">
+                  {interviewData?.questions?.[currentCount - 1]?.question_text ||
+                    "Waiting for next question..."}
                 </p>
-              </div>
+              </div> */}
 
               <div className="p-4 rounded-xl bg-[#002f24] border border-green-600/20 shadow-[0_0_12px_#00ffbf20]">
                 <h4 className="text-green-300 font-semibold mb-2">Tips</h4>
@@ -614,7 +808,11 @@ export default function VoiceInterviewRoom() {
               <MessageSquare className="w-4 h-4" /> Questions & Tips
             </h4>
 
-            <button onClick={() => setDrawerOpen(false)} className="p-2 rounded-md bg-white/5" aria-label="Close drawer">
+            <button
+              onClick={() => setDrawerOpen(false)}
+              className="p-2 rounded-md bg-white/5"
+              aria-label="Close drawer"
+            >
               <ChevronUp className="w-4 h-4 transform rotate-180" />
             </button>
           </div>
@@ -623,10 +821,13 @@ export default function VoiceInterviewRoom() {
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm text-gray-300">Current</span>
-                <span className="text-sm text-gray-200">{currentCount} / {maxCount}</span>
+                <span className="text-sm text-gray-200">
+                  {currentCount} / {maxCount}
+                </span>
               </div>
               <p className="text-sm text-gray-200 bg-white/5 p-3 rounded-lg">
-                {interviewData?.questions?.[currentCount - 1]?.question_text || "Waiting for next question..."}
+                {interviewData?.questions?.[currentCount - 1]?.question_text ||
+                  "Waiting for next question..."}
               </p>
             </div>
 
@@ -647,7 +848,9 @@ export default function VoiceInterviewRoom() {
       {confirmOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-darkbg-card p-6 rounded-xl border border-white/10 shadow-xl w-[90%] max-w-md text-center">
-            <h3 className="text-xl font-semibold text-white mb-4">Are you sure?</h3>
+            <h3 className="text-xl font-semibold text-white mb-4">
+              Are you sure?
+            </h3>
 
             <p className="text-gray-300 mb-6">{confirmText}</p>
 
@@ -678,6 +881,36 @@ export default function VoiceInterviewRoom() {
               >
                 Cancel
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 🔥 PROCESSING OVERLAY */}
+      {isProcessing && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <div className="flex flex-col items-center gap-4">
+              {/* Spinner */}
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+
+              {/* Message */}
+              <p className="text-lg font-medium text-gray-800 text-center">
+                {processingMessage || "Processing your answer..."}
+              </p>
+
+              {/* Optional: Progress dots */}
+              <div className="flex gap-1 mt-1">
+                <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
+                <div
+                  className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"
+                  style={{ animationDelay: "0.1s" }}
+                ></div>
+                <div
+                  className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"
+                  style={{ animationDelay: "0.2s" }}
+                ></div>
+              </div>
             </div>
           </div>
         </div>

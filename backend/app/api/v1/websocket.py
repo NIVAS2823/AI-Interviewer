@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 import base64
+import io
 from typing import Optional, Any, Dict, List
 from datetime import datetime
 
@@ -12,9 +13,10 @@ from app.core.deps import get_current_user_ws
 from app.core.database import get_database
 from app.services.voice_agent_service import VoiceAgentService
 from app.services.evaluation_service import EvaluationService
-from app.services.question_generator import QuestionGeneratorService
+# from app.services.question_generator import QuestionGeneratorService
 from app.models.interview import Question, ConversationMessage
 from app.models.resume import ParsedData
+from app.services.r2_storage_service import R2StorageService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -23,16 +25,20 @@ router = APIRouter()
 class VoiceInterviewSession:
     """Manages a single voice interview session with dynamic question generation (Smart Mode)."""
 
-    def __init__(self, websocket: WebSocket, interview_id: str, user_id: str, db):
+    def __init__(self, websocket: WebSocket, interview_id: str, user_id: str, db, voice: str = "aura-athena-en"):
         self.websocket = websocket
         self.interview_id = interview_id
         self.user_id = user_id
         self.db = db
 
+        # 🔥 Save voice inside the session
+        self.voice = voice
+
         # Services
         self.agent = VoiceAgentService()
+        # Cache will be initialized in start() after voice is set
+    
         self.evaluator = EvaluationService()
-        self.question_generator = QuestionGeneratorService()
 
         # Session state
         self.is_active = False
@@ -41,7 +47,12 @@ class VoiceInterviewSession:
         self.resume_data = None
         self.max_questions = 5
         self.conversation_history: List[ConversationMessage] = []
-        self.asked_questions: List[str] = []  # track asked question texts to avoid repetition
+        self.asked_questions: List[str] = []
+
+        self.audio_chunks = []
+        self.recording_enabled = True
+        self.r2_storage = R2StorageService()
+
 
     async def start(self) -> bool:
         """Validate interview, load resume, and begin by sending greeting."""
@@ -64,14 +75,17 @@ class VoiceInterviewSession:
             logger.info("🧹 Resetting previous questions for voice interview")
             await self.db.interviews.update_one(
                  {"_id": ObjectId(self.interview_id)},
-                 {"$set": {"questions": [], "updated_at": datetime.utcnow()}}
-                 )
+                {"$set": {"questions": [], "updated_at": datetime.utcnow()}}
+                )
             self.current_question_number = 0
             self.asked_questions = []
             self.interview_data = interview
             self.resume_data = ParsedData(**resume["parsed_data"])
             self.max_questions = interview.get("max_questions", 5)
             self.is_active = True
+
+            logger.info("🎤 Spawning background cache task...")
+            asyncio.create_task(self.agent.initialize_ack_cache(voice=self.voice))
 
             await self.send_greeting()
             return True
@@ -99,6 +113,7 @@ class VoiceInterviewSession:
                 candidate_name=candidate_name,
                 interview_type=interview_type,
                 num_questions=self.max_questions,
+                voice = self.voice
             )
 
             await self.send_audio_message(
@@ -116,11 +131,12 @@ class VoiceInterviewSession:
             )
             await self.save_message("ai", greeting["text"])
 
-            logger.info("⏳ Waiting 3 seconds for greeting to play...")
-            await asyncio.sleep(12.0)
+            # # logger.info("⏳ Waiting 3 seconds for greeting to play...")
+            # # await asyncio.sleep(12.0)
 
-            logger.info("🧠 Generating first question...")
-            await self.generate_and_send_next_question()
+            # logger.info("🧠 Generating first question...")
+            # await self.generate_and_send_next_question()
+            logger.info("Waiting for greeting_ack from client...")
 
         except Exception as e:
             logger.exception(f"❌ Greeting error: {e}")
@@ -139,27 +155,32 @@ class VoiceInterviewSession:
 
             # Attempt to generate a unique question
             question = None
+            question_audio = None  # 🔥 BETTER: Initialize here at the start
             attempts = 0
-            max_attempts = 5  # Increased from 3
+            max_attempts = 5
 
             while attempts < max_attempts and question is None:
                 attempts += 1
 
-                try:
-                    # Generate ONE question
-                    questions = await self.question_generator.generate_questions(
-                        parsed_resume=self.resume_data,
+                try:                
+                    # 🔥 Generate question using PARALLEL method (question + TTS together)
+                    result = await self.agent.generate_and_synthesize_question(
+                        resume=self.resume_data,
+                        job_description=self.interview_data.get("job_description"),
+                        conversation_history=self.conversation_history,
                         interview_type=self.interview_data.get("interview_type", "mixed"),
                         difficulty=self.interview_data.get("difficulty", "medium"),
-                        max_questions=1,
+                        question_number=self.current_question_number + 1,
+                        total_questions=self.max_questions,
+                        voice=self.voice,
                     )
 
-                    if not questions or len(questions) == 0:
-                        logger.warning(f"⚠️ Question generator returned empty on attempt {attempts}")
+                    if not result or not result.get("question"):
+                        logger.warning(f"⚠️ Parallel generation returned empty on attempt {attempts}")
                         await asyncio.sleep(0.3)
                         continue
 
-                    candidate_q = questions[0]
+                    candidate_q = result["question"]
                     q_text = getattr(candidate_q, "question_text", "").strip()
 
                     if not q_text:
@@ -168,23 +189,23 @@ class VoiceInterviewSession:
 
                     # ✅ CRITICAL: Check for duplicates using fuzzy matching
                     is_duplicate = False
-                    q_text_normalized = q_text.lower()[:80]  # First 80 chars normalized
+                    q_text_normalized = q_text.lower()[:80]
 
                     for asked_q in self.asked_questions:
                         asked_normalized = asked_q.lower()[:80]
 
-                        # Check if questions are too similar (>70% overlap)
-                        if self._calculate_similarity(q_text_normalized, asked_normalized) > 0.7:
+                        if self._calculate_similarity(q_text_normalized, asked_normalized) > 0.94:
                             logger.warning(f"🔄 Skipping similar question (attempt {attempts}): {q_text[:60]}...")
                             is_duplicate = True
                             break
 
                     if is_duplicate:
-                        await asyncio.sleep(0.5)  # Wait before retry
+                        await asyncio.sleep(0.5)
                         continue
 
                     # ✅ Question is unique!
                     question = candidate_q
+                    question_audio = result["audio_bytes"]  # Audio already generated!
                     logger.info(f"✅ Unique question generated on attempt {attempts}")
                     break
 
@@ -195,16 +216,28 @@ class VoiceInterviewSession:
             # If still no unique question after max attempts, use a fallback
             if not question:
                 logger.warning(f"⚠️ Could not generate unique question after {max_attempts} attempts")
-
-                # Create a simple fallback question based on what we haven't asked
                 question = self._create_fallback_question()
+                # question_audio remains None (already initialized above)
 
                 if not question:
                     await self.send_error("Failed to generate next question")
                     return
 
-            # Convert question to speech
-            question_response = await self.agent.ask_question(question)
+            # Use pre-generated audio if available, otherwise generate now
+            if question_audio and len(question_audio) > 0:
+                logger.info("⚡ Using pre-generated audio (parallel optimization)")
+                question_response = {
+                    "text": question.question_text,
+                    "audio_bytes": question_audio,
+                    "category": question.category,
+                    "difficulty": question.difficulty,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "message_type": "question",
+                }
+            else:
+                # Fallback: Generate TTS now (for fallback questions)
+                logger.info("🎤 Generating TTS for fallback question")
+                question_response = await self.agent.ask_question(question)
 
             # Send to client
             await self.send_audio_message(
@@ -217,7 +250,7 @@ class VoiceInterviewSession:
                     "category": getattr(question, "category", "mixed"),
                     "difficulty": getattr(question, "difficulty", "easy"),
                 },
-            )
+            )   
 
             # Save question text to prevent duplicates
             q_text = question_response["text"] or getattr(question, "question_text", "")
@@ -300,8 +333,15 @@ class VoiceInterviewSession:
             if not audio_data or len(audio_data) == 0:
                 await self.send_error("No audio received")
                 return
+            
+            max_size = 1_000_000  # 1MB ≈ 70 seconds at decent quality
+            if len(audio_data) > max_size:
+                logger.warning(f"⚠️ Large audio file: {len(audio_data)} bytes ({len(audio_data)/1_000_000:.1f}MB)")
+
 
             logger.info(f"🎤 Processing answer: {len(audio_data)} bytes")
+
+            await self.save_audio_chunk(audio_data, speaker="candidate")
 
             transcript = await self.agent.process_answer(audio_data)
 
@@ -360,7 +400,10 @@ class VoiceInterviewSession:
 
             logger.info(f"👋 Generating closing message for {candidate_name}")
 
-            closing = await self.agent.generate_closing(candidate_name)
+            closing = await self.agent.generate_closing(
+                candidate_name,
+                voice = self.voice
+                )
 
             await self.send_audio_message(
                 text=closing["text"],
@@ -370,8 +413,8 @@ class VoiceInterviewSession:
 
             await self.save_message("ai", closing["text"])
 
-            logger.info("⏳ Waiting 5 seconds for closing to play...")
-            await asyncio.sleep(20.0)
+            logger.info("⏳ Waiting 15 seconds for closing to play...")
+            await asyncio.sleep(12.0)
 
             await self.db.interviews.update_one(
                 {"_id": ObjectId(self.interview_id)},
@@ -383,6 +426,8 @@ class VoiceInterviewSession:
                     }
                 },
             )
+            #Upload interview recording to R2
+            await self.upload_interview_recording()
 
             self.is_active = False
 
@@ -475,6 +520,99 @@ class VoiceInterviewSession:
             logger.exception("Failed to save_message to DB")
 
 
+    async def save_audio_chunk(self, audio_data: bytes, speaker: str = "candidate"):
+        """
+        Save audio chunk for later upload
+    
+        Args:
+            audio_data: Raw audio bytes
+            speaker: 'candidate' or 'ai'
+        """
+        if not self.recording_enabled or not audio_data:
+            return
+    
+        try:
+         # Store chunk with metadata
+            chunk = {
+                'data': audio_data,
+                'speaker': speaker,
+                'timestamp': datetime.utcnow(),
+                'size': len(audio_data)
+            }
+            self.audio_chunks.append(chunk)
+        
+            logger.debug(f"💾 Saved audio chunk: {speaker}, {len(audio_data)} bytes (total chunks: {len(self.audio_chunks)})")
+        
+        except Exception as e:
+            logger.error(f"Failed to save audio chunk: {e}")
+
+
+
+    async def upload_interview_recording(self):
+        """
+        Combine all audio chunks and upload to R2
+        """
+        try:
+            if not self.audio_chunks or len(self.audio_chunks) == 0:
+                logger.warning("⚠️ No audio chunks to upload")
+                return
+        
+            logger.info(f"📼 Preparing to upload interview recording ({len(self.audio_chunks)} chunks)")
+        
+            # Combine all candidate audio chunks into one file
+            combined_audio = io.BytesIO()
+            total_size = 0
+        
+            for chunk in self.audio_chunks:
+                if chunk['speaker'] == 'candidate':  # Only save candidate audio
+                    combined_audio.write(chunk['data'])
+                    total_size += chunk['size']
+        
+            if total_size == 0:
+                logger.warning("⚠️ No candidate audio to upload")
+                return
+        
+            audio_bytes = combined_audio.getvalue()
+        
+            logger.info(f"📦 Combined audio: {len(audio_bytes)} bytes from {len([c for c in self.audio_chunks if c['speaker'] == 'candidate'])} chunks")
+        
+            # Upload to R2
+            result = await self.r2_storage.upload_recording(
+                interview_id=self.interview_id,
+                audio_data=audio_bytes,
+                file_type="webm",
+                metadata={
+                    'candidate_id': str(self.user_id),
+                    'question_count': str(self.current_question_number),
+                    'total_chunks': str(len(self.audio_chunks))
+                }
+            )
+        
+            if result:
+                logger.info(f"✅ Recording uploaded to R2")
+                logger.info(f"   URL: {result['public_url']}")
+            
+                # Save recording URL to interview document
+                await self.db.interviews.update_one(
+                    {"_id": ObjectId(self.interview_id)},
+                    {
+                        "$set": {
+                            "recording_url": result['public_url'],
+                            "recording_key": result['key'],
+                            "recording_size": result['size'],
+                            "updated_at": datetime.utcnow()
+                        }
+                    }
+                )
+            
+                logger.info(f"✅ Recording URL saved to database")
+            else:
+                logger.error("❌ Failed to upload recording to R2")
+    
+        except Exception as e:
+            logger.exception(f"❌ Error uploading interview recording: {e}")
+
+
 @router.websocket("/ws/interview/{interview_id}/voice")
 async def voice_interview_websocket(
     websocket: WebSocket,
@@ -513,7 +651,8 @@ async def voice_interview_websocket(
         websocket=websocket,
         interview_id=interview_id,
         user_id=user_id,
-        db=db
+        db=db,
+        voice="aura-athena-en"
     )
 
     try:
@@ -547,10 +686,9 @@ async def voice_interview_websocket(
                     await session.send_message({"type": "pong"})
 
                 elif msg_type == "greeting_ack":
-                    logger.info(
-                        "Received greeting_ack from client - sending first question"
-                    )
-                    await session.generate_and_send_next_question()
+                    logger.info("Client acknowledged greeting — sending first question")
+                    asyncio.create_task(session.generate_and_send_next_question())
+
 
                 elif msg_type == "text_answer":
                     text_answer = data.get("text", "")

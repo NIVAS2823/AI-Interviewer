@@ -24,6 +24,22 @@ class InterviewEngineService:
         self.evaluation_service = EvaluationService()
         self.videosdk = VideoSDKAgentService()
 
+    def _extract_skill_list(self, skills_obj):
+        if not skills_obj:
+            return []
+
+        # Flatten all skill groups into one list
+        skills = (
+            skills_obj.keywords +
+            skills_obj.technical +
+            skills_obj.soft +
+            skills_obj.tools
+        )
+
+        # Return top 10 unique skills
+        return list(dict.fromkeys(skills))[:10]
+
+
     async def create_interview(
         self,
         candidate_id: str,
@@ -73,7 +89,7 @@ class InterviewEngineService:
             # Build system prompt for AI agent (questions may be filled later)
             candidate_info = {
                 "name": parsed_resume.name,
-                "skills": parsed_resume.skills[:10] if parsed_resume.skills else [],
+                "skills": self._extract_skill_list(parsed_resume.skills),
                 "experience_years": len(parsed_resume.experience) if parsed_resume.experience else 0,
                 "education": [
                     f"{edu.degree} in {edu.field}"
@@ -572,12 +588,13 @@ class InterviewEngineService:
 
         # Generate question using Groq
         if not settings.GROQ_API_KEY:
+            skills_list = self._extract_skill_list(parsed_resume.skills)
             # Fallback question
             fallback_question = Question(
                 question_text=f"Tell me more about your experience with the skills mentioned in your resume.",
                 category=interview_type,
                 difficulty=difficulty,
-                expected_topics=parsed_resume.skills[:3] if parsed_resume.skills else [],
+                expected_topics=skills_list[:3],
             )
             await self._save_question_to_db(interview_id, fallback_question, db)
             return fallback_question
@@ -693,7 +710,9 @@ Return ONLY valid JSON in this exact format (no markdown, no extra text):
         if parsed_resume.name:
             context_parts.append(f"Name: {parsed_resume.name}")
         if parsed_resume.skills:
-            context_parts.append(f"Skills: {', '.join(parsed_resume.skills[:10])}")
+            skills = self._extract_skill_list(parsed_resume.skills)
+            context_parts.append(f"Skills: {', '.join(skills)}")
+
         if parsed_resume.experience:
             context_parts.append("Experience:")
             for exp in parsed_resume.experience[:3]:

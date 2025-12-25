@@ -12,6 +12,11 @@ from app.core.database import (
 )
 from app.api.v1 import health, auth,resume,interview,evaluation,websocket
 
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 
 # =========================
 # 🧠 LOGGING CONFIGURATION
