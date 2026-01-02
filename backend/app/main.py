@@ -10,7 +10,7 @@ from app.core.database import (
     connect_to_redis,
     close_redis_connection,
 )
-from app.api.v1 import health, auth,resume,interview,evaluation,websocket
+from app.api.v1 import health, auth,resume,interview,evaluation,websocket,agent_memory
 
 from dotenv import load_dotenv
 
@@ -95,6 +95,7 @@ app.include_router(resume.router,prefix="/api/v1/resume",tags=["Resume"])
 app.include_router(interview.router, prefix="/api/v1/interview", tags=["Interview"])
 app.include_router(evaluation.router, prefix="/api/v1/evaluation", tags=["Evaluation"])
 app.include_router(websocket.router, prefix="/api/v1", tags=["WebSocket"])
+app.include_router(agent_memory.router, prefix="/api/v1",tags=["Agent-Memory"]) 
 
 
 # =========================

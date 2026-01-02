@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status,
 from typing import List
 from bson import ObjectId
 from datetime import datetime
+import logging
 
 from app.schemas.resume import (
     ResumeUploadResponse,
@@ -15,6 +16,7 @@ from app.core.deps import get_current_user
 from app.utils.file_handler import FileHandler
 from app.services.resume_parser import ResumeParserService
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 file_handler = FileHandler()
@@ -23,23 +25,25 @@ parser_service = ResumeParserService()
 
 async def process_resume_parsing(resume_id: str, file_path: str, db):
     """
-    Background task to parse resume (NO CELERY NEEDED!)
-    Uses FastAPI BackgroundTasks - completely free
+    Background task to parse resume (FastAPI BackgroundTasks)
     """
     try:
-        # Update status
+        logger.info(f"🧠 Background parsing started for resume {resume_id}")
+
+        # Mark as processing
         await db.resumes.update_one(
             {"_id": ObjectId(resume_id)},
             {"$set": {"parsing_status": "processing"}}
         )
-        
-        # Parse resume with Groq AI (FREE)
+
+        # Parse resume (AI or fallback)
         parsed_data = await parser_service.parse_resume(file_path)
-        
-        # Calculate score
-        completeness_score = parser_service.calculate_completeness_score(parsed_data)
-        
-        # Update database
+
+        # ⚠️ IMPORTANT:
+        # completeness_score is ALREADY calculated inside parse_resume()
+        completeness_score = parsed_data.completeness_score
+
+        # Persist parsed data
         await db.resumes.update_one(
             {"_id": ObjectId(resume_id)},
             {
@@ -51,17 +55,21 @@ async def process_resume_parsing(resume_id: str, file_path: str, db):
                 }
             }
         )
-        
-        print(f"✅ Resume {resume_id} parsed. Score: {completeness_score}")
-        
+
+        logger.info(
+            f"✅ Resume {resume_id} parsed successfully | Score={completeness_score}/100"
+        )
+
     except Exception as e:
-        print(f"❌ Parsing error: {e}")
+        logger.exception(f"❌ Resume parsing failed for {resume_id}")
+
         await db.resumes.update_one(
             {"_id": ObjectId(resume_id)},
             {
                 "$set": {
                     "parsing_status": "failed",
-                    "parsing_error": str(e)
+                    "parsing_error": str(e),
+                    "updated_at": datetime.utcnow()
                 }
             }
         )
@@ -75,21 +83,19 @@ async def upload_resume(
     db = Depends(get_database)
 ):
     """
-    Upload resume PDF
-    
-    - Validates PDF file
-    - Saves to local storage
-    - Triggers background parsing (Groq AI)
-    - Returns immediately (async processing)
+    Upload resume PDF and trigger background parsing
     """
-    
+
     # Validate file
     file_handler.validate_file_type(file)
-    
+
     # Save file
-    file_path, file_size = await file_handler.save_upload_file(file, str(current_user.id))
-    
-    # Create resume document
+    file_path, file_size = await file_handler.save_upload_file(
+        file,
+        str(current_user.id)
+    )
+
+    # Create DB record
     resume_doc = {
         "user_id": current_user.id,
         "file_name": file.filename,
@@ -101,13 +107,20 @@ async def upload_resume(
         "parsing_status": "pending",
         "uploaded_at": datetime.utcnow()
     }
-    
+
     result = await db.resumes.insert_one(resume_doc)
     resume_id = str(result.inserted_id)
-    
-    # Add background task for parsing (FREE - no Celery needed)
-    background_tasks.add_task(process_resume_parsing, resume_id, file_path, db)
-    
+
+    # Fire background parsing
+    background_tasks.add_task(
+        process_resume_parsing,
+        resume_id,
+        file_path,
+        db
+    )
+
+    logger.info(f"📄 Resume uploaded: {resume_id}")
+
     return ResumeUploadResponse(
         id=resume_id,
         file_name=file.filename,
@@ -123,11 +136,14 @@ async def list_resumes(
     current_user: UserModel = Depends(get_current_user),
     db = Depends(get_database)
 ):
-    """Get all resumes for current user"""
-    
-    cursor = db.resumes.find({"user_id": current_user.id}).sort("uploaded_at", -1)
+    """List all resumes for current user"""
+
+    cursor = db.resumes.find(
+        {"user_id": current_user.id}
+    ).sort("uploaded_at", -1)
+
     resumes = await cursor.to_list(length=100)
-    
+
     return [
         ResumeListResponse(
             id=str(resume["_id"]),
@@ -146,25 +162,25 @@ async def get_resume(
     current_user: UserModel = Depends(get_current_user),
     db = Depends(get_database)
 ):
-    """Get detailed resume with parsed data"""
-    
+    """Get resume details"""
+
     if not ObjectId.is_valid(resume_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid resume ID"
         )
-    
+
     resume = await db.resumes.find_one({
         "_id": ObjectId(resume_id),
         "user_id": current_user.id
     })
-    
+
     if not resume:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Resume not found"
         )
-    
+
     return ResumeDetailResponse(
         id=str(resume["_id"]),
         user_id=str(resume["user_id"]),
@@ -184,29 +200,27 @@ async def delete_resume(
     current_user: UserModel = Depends(get_current_user),
     db = Depends(get_database)
 ):
-    """Delete resume and associated file"""
-    
+    """Delete resume and file"""
+
     if not ObjectId.is_valid(resume_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid resume ID"
         )
-    
+
     resume = await db.resumes.find_one({
         "_id": ObjectId(resume_id),
         "user_id": current_user.id
     })
-    
+
     if not resume:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Resume not found"
         )
-    
-    # Delete file from storage
+
     await file_handler.delete_file(resume["file_path"])
-    
-    # Delete from database
     await db.resumes.delete_one({"_id": ObjectId(resume_id)})
-    
+
+    logger.info(f"🗑️ Resume deleted: {resume_id}")
     return None

@@ -132,18 +132,14 @@ class EvaluationService:
     # ==========================================================
     async def _evaluate_with_groq(self, context: str, interview_type: str, difficulty: str) -> Evaluation:
         prompt = f"""
-You are a senior hiring panel evaluator (Tech Lead + HR + Behavioral Analyst).
-Evaluate the interview with extreme precision and return ONLY valid JSON.
+You are a highly experienced **interview evaluator**, combining expertise as a **Senior Technical Lead, HR Specialist, and Behavioral Analyst**.
+Your goal is to **evaluate an interview transcript with accuracy, fairness, and consistency** across multiple dimensions.
 
-Use the following criteria:
-- Technical correctness and depth
-- Clarity and structure
-- Reasoning ability
-- Communication quality
-- Confidence and tone
-- Behavioral insight
-- Question-specific answer quality
-- Missing concepts or red flags
+==========================
+EVALUATION PURPOSE
+==========================
+You must assess how well the candidate performed in this interview
+based ONLY on what they actually said — **no assumptions, no hallucination**.
 
 ==========================
 INTERVIEW METADATA
@@ -152,30 +148,53 @@ Interview Type: {interview_type}
 Difficulty: {difficulty}
 
 ==========================
-INTERVIEW CONTENT
+INTERVIEW TRANSCRIPT
 ==========================
 {context}
 
 ==========================
-OUTPUT JSON FORMAT
+EVALUATION DIMENSIONS
 ==========================
-Return JSON ONLY matching this structure:
+Evaluate the candidate on the following precise criteria:
+1. **Technical correctness and depth** — Did the candidate demonstrate accurate, in-depth understanding?
+2. **Clarity and structure** — Were responses organized, coherent, and easy to follow?
+3. **Reasoning and problem-solving ability** — Did their answers show logical thinking or practical decision-making?
+4. **Communication quality** — Was the communication clear, concise, and professional?
+5. **Confidence and tone** — Did the candidate sound confident and composed?
+6. **Behavioral and interpersonal insight** — Did responses reflect maturity, teamwork, attitude, or cultural fit?
+7. **Question-specific answer quality** — Was each answer appropriate and relevant to the question asked?
+8. **Red flags** — Identify any concerning gaps, inaccuracies, or attitude issues if present.
+
+==========================
+SCORING RULES
+==========================
+- All numeric scores MUST be integers between **0 and 100**.
+- `overall_score` represents total evaluation (percentage out of 100).
+- Other key scores (technical_score, communication_score, confidence_score, behavioral_score) also use **0–100**.
+- Be strict and consistent. Do not inflate scores.
+- Weigh scores relative to the interview difficulty.
+
+==========================
+OUTPUT REQUIREMENTS
+==========================
+Return **only valid JSON** matching EXACTLY this structure:
 {self.EVAL_JSON_TEMPLATE}
 
-==========================
-SCORING NOTES
-==========================
-- All scores MUST be between 0 and 100.
-- overall_score is the final percentage (0–100).
-- technical_score, communication_score, confidence_score, behavioral_score are also 0–100.
-- Score strictly.
-- Never hallucinate knowledge.
-- Evaluate only what the candidate actually said.
-- Provide clear strengths and improvements.
-- Every question must have its own evaluation entry.
+Formatting rules:
+- Do NOT include any extra commentary outside JSON.
+- Each question in the interview must have its own structured evaluation entry.
+- Use short, clear phrases for strengths and improvements.
+- Never reference yourself, the model, or instructions.
 
-BEGIN NOW.
+==========================
+FINAL INSTRUCTIONS
+==========================
+You are NOT writing feedback for the candidate — you are writing a **professional evaluation record**.
+Evaluate precisely what is said, reflect no bias, and maintain factual neutrality.
+
+BEGIN EVALUATION.
 """
+
 
         chat_completion = self.client.chat.completions.create(
             messages=[

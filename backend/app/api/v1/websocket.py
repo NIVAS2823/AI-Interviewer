@@ -1,616 +1,201 @@
-import asyncio
-import logging
-import json
-import base64
-import io
-from typing import Optional, Any, Dict, List
-from datetime import datetime
+"""
+Voice Interview WebSocket Handler (Refactored)
+Thin handler that delegates all business logic to orchestrator
 
+Responsibilities (ONLY):
+- Accept WebSocket connections
+- Receive messages from client
+- Send messages to client
+- Delegate to orchestrator
+"""
+import asyncio
+import json
+import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
-from bson import ObjectId
 
 from app.core.deps import get_current_user_ws
 from app.core.database import get_database
-from app.services.voice_agent_service import VoiceAgentService
-from app.services.evaluation_service import EvaluationService
-# from app.services.question_generator import QuestionGeneratorService
-from app.models.interview import Question, ConversationMessage
-from app.models.resume import ParsedData
-from app.services.r2_storage_service import R2StorageService
+from app.services.orchestration.voice_interview_orchestrator import VoiceInterviewOrchestrator
+from app.services.voice_interview.audio_recording_service import AudioRecordingService
+from app.services.voice_interview.websocket_message_service import WebSocketMessageService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+MAX_AUDIO_BYTES = 1_048_576  # 1 MB hard cap
+OPUS_BITRATE_BPS = 128_000   
 
-class VoiceInterviewSession:
-    """Manages a single voice interview session with dynamic question generation (Smart Mode)."""
-
-    def __init__(self, websocket: WebSocket, interview_id: str, user_id: str, db, voice: str = "aura-athena-en"):
-        self.websocket = websocket
-        self.interview_id = interview_id
-        self.user_id = user_id
-        self.db = db
-
-        # 🔥 Save voice inside the session
-        self.voice = voice
-
-        # Services
-        self.agent = VoiceAgentService()
-        # Cache will be initialized in start() after voice is set
+class WebSocketHandler:
+    """
+    Lightweight WebSocket handler
     
-        self.evaluator = EvaluationService()
-
-        # Session state
-        self.is_active = False
-        self.current_question_number = 0
-        self.interview_data = None
-        self.resume_data = None
-        self.max_questions = 5
-        self.conversation_history: List[ConversationMessage] = []
-        self.asked_questions: List[str] = []
-
-        self.audio_chunks = []
-        self.recording_enabled = True
-        self.r2_storage = R2StorageService()
-
-
-    async def start(self) -> bool:
-        """Validate interview, load resume, and begin by sending greeting."""
-        try:
-            interview = await self.db.interviews.find_one({"_id": ObjectId(self.interview_id)})
-            if not interview:
-                await self.send_error("Interview not found")
-                return False
-
-            candidate_id_str = str(interview.get("candidate_id"))
-            if candidate_id_str != str(self.user_id):
-                await self.send_error("Not authorized for this interview")
-                return False
-
-            resume = await self.db.resumes.find_one({"_id": interview.get("resume_id")})
-            if not resume or not resume.get("parsed_data"):
-                await self.send_error("Resume data not found or not parsed")
-                return False
-
-            logger.info("🧹 Resetting previous questions for voice interview")
-            await self.db.interviews.update_one(
-                 {"_id": ObjectId(self.interview_id)},
-                {"$set": {"questions": [], "updated_at": datetime.utcnow()}}
-                )
-            self.current_question_number = 0
-            self.asked_questions = []
-            self.interview_data = interview
-            self.resume_data = ParsedData(**resume["parsed_data"])
-            self.max_questions = interview.get("max_questions", 5)
-            self.is_active = True
-
-            logger.info("🎤 Spawning background cache task...")
-            asyncio.create_task(self.agent.initialize_ack_cache(voice=self.voice))
-
-            await self.send_greeting()
-            return True
-
-        except Exception as e:
-            logger.exception("Exception during session.start: %s", e)
-            await self.send_error("Failed to start session")
-            return False
-
-    async def send_greeting(self):
-        """Send welcome message with audio"""
-        try:
-            if hasattr(self.resume_data, "name"):
-                candidate_name = self.resume_data.name
-            elif hasattr(self.resume_data, "personal_info"):
-                candidate_name = self.resume_data.personal_info.get("name", "there")
-            else:
-                candidate_name = "there"
-
-            interview_type = self.interview_data.get("interview_type", "mixed")
-
-            logger.info("👋 Sending greeting (will not count as question)")
-
-            greeting = await self.agent.generate_greeting(
-                candidate_name=candidate_name,
-                interview_type=interview_type,
-                num_questions=self.max_questions,
-                voice = self.voice
-            )
-
-            await self.send_audio_message(
-                text=greeting["text"],
-                audio_bytes=greeting["audio_bytes"],
-                message_type="greeting",
-            )
-
-            self.conversation_history.append(
-                ConversationMessage(
-                    speaker="ai",
-                    text=greeting["text"],
-                    timestamp=greeting["timestamp"]
-                )
-            )
-            await self.save_message("ai", greeting["text"])
-
-            # # logger.info("⏳ Waiting 3 seconds for greeting to play...")
-            # # await asyncio.sleep(12.0)
-
-            # logger.info("🧠 Generating first question...")
-            # await self.generate_and_send_next_question()
-            logger.info("Waiting for greeting_ack from client...")
-
-        except Exception as e:
-            logger.exception(f"❌ Greeting error: {e}")
-            await self.send_error("Failed to send greeting")
-
-    async def generate_and_send_next_question(self):
-        """Generate a non-repeating, context-aware next question"""
-        try:
-            # Check if interview is complete
-            if self.current_question_number >= self.max_questions:
-                logger.info(f"✅ All questions asked ({self.max_questions}), sending closing")
-                await self.send_closing()
-                return
-
-            logger.info(f"🧠 Generating question {self.current_question_number + 1}/{self.max_questions}")
-
-            # Attempt to generate a unique question
-            question = None
-            question_audio = None  # 🔥 BETTER: Initialize here at the start
-            attempts = 0
-            max_attempts = 5
-
-            while attempts < max_attempts and question is None:
-                attempts += 1
-
-                try:                
-                    # 🔥 Generate question using PARALLEL method (question + TTS together)
-                    result = await self.agent.generate_and_synthesize_question(
-                        resume=self.resume_data,
-                        job_description=self.interview_data.get("job_description"),
-                        conversation_history=self.conversation_history,
-                        interview_type=self.interview_data.get("interview_type", "mixed"),
-                        difficulty=self.interview_data.get("difficulty", "medium"),
-                        question_number=self.current_question_number + 1,
-                        total_questions=self.max_questions,
-                        voice=self.voice,
-                    )
-
-                    if not result or not result.get("question"):
-                        logger.warning(f"⚠️ Parallel generation returned empty on attempt {attempts}")
-                        await asyncio.sleep(0.3)
-                        continue
-
-                    candidate_q = result["question"]
-                    q_text = getattr(candidate_q, "question_text", "").strip()
-
-                    if not q_text:
-                        logger.warning(f"⚠️ Generated empty question on attempt {attempts}")
-                        continue
-
-                    # ✅ CRITICAL: Check for duplicates using fuzzy matching
-                    is_duplicate = False
-                    q_text_normalized = q_text.lower()[:80]
-
-                    for asked_q in self.asked_questions:
-                        asked_normalized = asked_q.lower()[:80]
-
-                        if self._calculate_similarity(q_text_normalized, asked_normalized) > 0.94:
-                            logger.warning(f"🔄 Skipping similar question (attempt {attempts}): {q_text[:60]}...")
-                            is_duplicate = True
-                            break
-
-                    if is_duplicate:
-                        await asyncio.sleep(0.5)
-                        continue
-
-                    # ✅ Question is unique!
-                    question = candidate_q
-                    question_audio = result["audio_bytes"]  # Audio already generated!
-                    logger.info(f"✅ Unique question generated on attempt {attempts}")
-                    break
-
-                except Exception as e:
-                    logger.exception(f"❌ Question generation attempt {attempts} failed: {e}")
-                    await asyncio.sleep(0.3)
-
-            # If still no unique question after max attempts, use a fallback
-            if not question:
-                logger.warning(f"⚠️ Could not generate unique question after {max_attempts} attempts")
-                question = self._create_fallback_question()
-                # question_audio remains None (already initialized above)
-
-                if not question:
-                    await self.send_error("Failed to generate next question")
-                    return
-
-            # Use pre-generated audio if available, otherwise generate now
-            if question_audio and len(question_audio) > 0:
-                logger.info("⚡ Using pre-generated audio (parallel optimization)")
-                question_response = {
-                    "text": question.question_text,
-                    "audio_bytes": question_audio,
-                    "category": question.category,
-                    "difficulty": question.difficulty,
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "message_type": "question",
-                }
-            else:
-                # Fallback: Generate TTS now (for fallback questions)
-                logger.info("🎤 Generating TTS for fallback question")
-                question_response = await self.agent.ask_question(question)
-
-            # Send to client
-            await self.send_audio_message(
-                text=question_response["text"],
-                audio_bytes=question_response["audio_bytes"],
-                message_type="question",
-                metadata={
-                    "question_number": self.current_question_number + 1,
-                    "total_questions": self.max_questions,
-                    "category": getattr(question, "category", "mixed"),
-                    "difficulty": getattr(question, "difficulty", "easy"),
-                },
-            )   
-
-            # Save question text to prevent duplicates
-            q_text = question_response["text"] or getattr(question, "question_text", "")
-            self.asked_questions.append(q_text)
-
-            logger.info(f"📌 Saved to asked_questions (total: {len(self.asked_questions)}): {q_text[:60]}...")
-
-            # Save to conversation history
-            question_msg = ConversationMessage(
-                speaker="ai",
-                text=question_response["text"],
-                timestamp=question_response["timestamp"]
-            )
-            self.conversation_history.append(question_msg)
-
-            # Save to database
-            await self.save_message("ai", question_response["text"])
-            await self.save_question_to_db(question)
-
-            self.current_question_number += 1
-
-            logger.info(f"📝 Question {self.current_question_number}/{self.max_questions} sent and saved")
-
-        except Exception as e:
-            logger.exception(f"❌ Question generation error: {e}")
-            await self.send_error("Failed to generate question")
-
-    def _calculate_similarity(self, str1: str, str2: str) -> float:
-        """Calculate similarity ratio between two strings (0.0 to 1.0)"""
-        # Simple character overlap calculation
-        if not str1 or not str2:
-            return 0.0
-
-        # Convert to sets of words
-        words1 = set(str1.split())
-        words2 = set(str2.split())
-
-        if not words1 or not words2:
-            return 0.0
-
-        # Calculate Jaccard similarity
-        intersection = len(words1 & words2)
-        union = len(words1 | words2)
-
-        return intersection / union if union > 0 else 0.0
-
-    def _create_fallback_question(self) -> Optional[Question]:
-        """Create a simple fallback question when AI fails to generate unique ones"""
-        fallback_questions = [
-            "Tell me about a challenging project you worked on recently.",
-            "What technical skills are you most proud of?",
-            "Describe your experience with team collaboration.",
-            "What motivates you in your career?",
-            "How do you approach learning new technologies?",
-        ]
-
-        # Pick one that hasn't been asked yet
-        for fb_text in fallback_questions:
-            is_used = any(fb_text.lower() in asked.lower() for asked in self.asked_questions)
-            if not is_used:
-                logger.info(f"📋 Using fallback question: {fb_text}")
-                # Create a Question object
-                try:
-                    from app.models.interview import Question
-                    return Question(
-                        question_text=fb_text,
-                        category=self.interview_data.get("interview_type", "mixed"),
-                        difficulty=self.interview_data.get("difficulty", "easy"),
-                        expected_answer=""
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to create fallback question: {e}")
-                    return None
-
-        return None
-
-    async def process_answer(self, audio_data: bytes):
-        """Process candidate's audio answer"""
-        try:
-            if not audio_data or len(audio_data) == 0:
-                await self.send_error("No audio received")
-                return
-            
-            max_size = 1_000_000  # 1MB ≈ 70 seconds at decent quality
-            if len(audio_data) > max_size:
-                logger.warning(f"⚠️ Large audio file: {len(audio_data)} bytes ({len(audio_data)/1_000_000:.1f}MB)")
-
-
-            logger.info(f"🎤 Processing answer: {len(audio_data)} bytes")
-
-            await self.save_audio_chunk(audio_data, speaker="candidate")
-
-            transcript = await self.agent.process_answer(audio_data)
-
-            if not transcript or len(transcript.strip()) == 0:
-                logger.warning("⚠️ Empty transcription")
-                await self.send_error(
-                    "Could not transcribe audio. Please speak louder and try again."
-                )
-                return
-
-            logger.info(f"📝 Transcribed: {transcript[:100]}...")
-
-            answer_msg = ConversationMessage(
-                speaker="candidate",
-                text=transcript,
-                timestamp=datetime.utcnow().isoformat()
-            )
-            self.conversation_history.append(answer_msg)
-            await self.save_message("candidate", transcript)
-
-            await self.send_message({"type": "transcription", "text": transcript})
-
-            ack = await self.agent.generate_acknowledgment(transcript)
-
-            await self.send_audio_message(
-                text=ack["text"],
-                audio_bytes=ack["audio_bytes"],
-                message_type="acknowledgment",
-            )
-
-            ack_msg = ConversationMessage(
-                speaker="ai",
-                text=ack["text"],
-                timestamp=ack["timestamp"]
-            )
-            self.conversation_history.append(ack_msg)
-
-            await self.save_message("ai", ack["text"])
-
-            await asyncio.sleep(0.5)
-            await self.generate_and_send_next_question()
-
-        except Exception as e:
-            logger.exception(f"❌ Answer processing error: {e}")
-            await self.send_error("Failed to process answer")
-
-    async def send_closing(self):
-        """Send closing message and mark interview complete"""
-        try:
-            if hasattr(self.resume_data, "name"):
-                candidate_name = self.resume_data.name
-            elif hasattr(self.resume_data, "personal_info"):
-                candidate_name = self.resume_data.personal_info.get("name", "there")
-            else:
-                candidate_name = "there"
-
-            logger.info(f"👋 Generating closing message for {candidate_name}")
-
-            closing = await self.agent.generate_closing(
-                candidate_name,
-                voice = self.voice
-                )
-
-            await self.send_audio_message(
-                text=closing["text"],
-                audio_bytes=closing["audio_bytes"],
-                message_type="closing",
-            )
-
-            await self.save_message("ai", closing["text"])
-
-            logger.info("⏳ Waiting 15 seconds for closing to play...")
-            await asyncio.sleep(12.0)
-
-            await self.db.interviews.update_one(
-                {"_id": ObjectId(self.interview_id)},
-                {
-                    "$set": {
-                        "status": "completed",
-                        "completed_at": datetime.utcnow(),
-                        "updated_at": datetime.utcnow()
-                    }
-                },
-            )
-            #Upload interview recording to R2
-            await self.upload_interview_recording()
-
-            self.is_active = False
-
-            await self.send_message({
-                "type": "interview_complete",
-                "message": "Interview completed successfully",
-                "total_questions": self.current_question_number
-            })
-
-            logger.info(
-                f"✅ Interview completed: {self.interview_id} "
-                f"({self.current_question_number} questions)"
-            )
-
-        except Exception as e:
-            logger.exception(f"❌ Closing error: {e}")
-            await self.send_error("Failed to complete interview")
-
-    async def save_question_to_db(self, question: Question):
-        """Append generated question to interviews.questions array (safe)."""
-        try:
-            question_dict = {
-                "question_text": getattr(question, "question_text", ""),
-                "category": getattr(question, "category", ""),
-                "difficulty": getattr(question, "difficulty", ""),
-                "expected_answer": getattr(question, "expected_answer", ""),
-                "generated_at": datetime.utcnow()
-            }
-
-            await self.db.interviews.update_one(
-                {"_id": ObjectId(self.interview_id)},
-                {
-                    "$push": {"questions": question_dict},
-                    "$set": {"updated_at": datetime.utcnow()}
-                }
-            )
-
-        except Exception as e:
-            logger.exception("Failed to save question to DB: %s", e)
-
-    async def send_audio_message(self, text: str, audio_bytes: bytes, message_type: str, metadata: Optional[dict] = None):
-        """Send an audio message payload (base64) to the client."""
-        try:
-            audio_base64 = base64.b64encode(audio_bytes or b"").decode("utf-8")
-            payload = {
-                "type": message_type,
-                "text": text,
-                "audio": audio_base64,
-                "metadata": metadata or {},
-            }
-            await self.websocket.send_json(payload)
-            logger.debug(
-                "Sent audio message type=%s len_audio=%d",
-                message_type,
-                len(audio_bytes or b"")
-            )
-        except Exception as e:
-            logger.exception("Failed to send_audio_message: %s", e)
+    Responsibilities:
+    - WebSocket I/O ONLY
+    - Message routing
+    - Connection management
+    
+    Does NOT:
+    - Contain business logic
+    - Access database directly
+    - Generate questions
+    - Process audio
+    """
+
+    def __init__(
+        self,
+        websocket: WebSocket,
+        orchestrator: VoiceInterviewOrchestrator,
+    ):
+        """
+        Initialize handler
+        
+        Args:
+            websocket: WebSocket connection
+            orchestrator: Voice interview orchestrator
+        """
+        self.websocket = websocket
+        self.orchestrator = orchestrator
+        self.message_service = WebSocketMessageService()
+        self.audio_recording = AudioRecordingService()
 
     async def send_message(self, message: dict):
-        """Send a JSON message (non-audio) to the client."""
+        """Send JSON message to client"""
         try:
             await self.websocket.send_json(message)
         except Exception as e:
-            logger.exception("Failed to send_message: %s", e)
+            logger.error(f"Failed to send message: {e}")
 
-    async def send_error(self, error: str):
-        """Helper to send error message to client."""
-        try:
-            await self.websocket.send_json({"type": "error", "message": error})
-        except Exception:
-            pass
+    async def send_error(self, error: str, code: str = None):
+        """Send error message to client"""
+        error_msg = self.message_service.format_error(error, code)
+        await self.send_message(error_msg)
 
-    async def save_message(self, speaker: str, text: str):
-        """Save a conversation message into the interviews.conversation array."""
-        try:
-            msg = {
-                "speaker": speaker,
-                "text": text,
-                "timestamp": datetime.utcnow()
-            }
-            await self.db.interviews.update_one(
-                {"_id": ObjectId(self.interview_id)},
-                {
-                    "$push": {"conversation": msg},
-                    "$set": {"updated_at": datetime.utcnow()}
-                },
-            )
-        except Exception:
-            logger.exception("Failed to save_message to DB")
+    async def handle_greeting_ack(self, session):
+        """Handle greeting acknowledgment from client"""
+        logger.info("Client acknowledged greeting — sending first question")
+        
+        question_msg = await self.orchestrator.generate_next_question(
+            session,
+            self.audio_recording
+        )
+        
+        if question_msg:
+            await self.send_message(question_msg)
+        else:
+            await self.send_error("Failed to generate first question")
 
+    async def handle_audio_answer(self, audio_data: bytes, session):
+        """Handle audio answer from client"""
+        # Process answer
+        success, error, ack_message = await self.orchestrator.process_answer(
+            session,
+            audio_data,
+            self.audio_recording
+        )
 
-    async def save_audio_chunk(self, audio_data: bytes, speaker: str = "candidate"):
-        """
-        Save audio chunk for later upload
-    
-        Args:
-            audio_data: Raw audio bytes
-            speaker: 'candidate' or 'ai'
-        """
-        if not self.recording_enabled or not audio_data:
+        if not success:
+            await self.send_error(error or "Failed to process answer")
             return
-    
-        try:
-         # Store chunk with metadata
-            chunk = {
-                'data': audio_data,
-                'speaker': speaker,
-                'timestamp': datetime.utcnow(),
-                'size': len(audio_data)
-            }
-            self.audio_chunks.append(chunk)
+
+        # Send transcription notification
+        # (transcription is included in acknowledgment flow)
+
+        # Send acknowledgment
+        if ack_message:
+            await self.send_message(ack_message)
+
+        # Generate next question after brief pause
+        await asyncio.sleep(0.5)
         
-            logger.debug(f"💾 Saved audio chunk: {speaker}, {len(audio_data)} bytes (total chunks: {len(self.audio_chunks)})")
+        question_msg = await self.orchestrator.generate_next_question(
+            session,
+            self.audio_recording
+        )
+
+        if question_msg:
+            await self.send_message(question_msg)
+        else:
+            # All questions done, send closing
+            await self.handle_stop(session)
+
+    async def handle_text_answer(self, text: str, session):
+        """Handle text answer from client (fallback mode)"""
+        # Convert text to pseudo-audio format for processing
+        # In real implementation, you'd handle this differently
         
-        except Exception as e:
-            logger.error(f"Failed to save audio chunk: {e}")
+        # For now, we'll add to conversation directly
+        session.add_message("candidate", text)
+        
+        await self.orchestrator.repos.conversations.add_message(
+            session.interview_id,
+            "candidate",
+            text
+        )
 
+        # Send transcription
+        transcription_msg = self.message_service.format_transcription(text)
+        await self.send_message(transcription_msg)
 
+        # Generate acknowledgment
+        ack = await self.orchestrator.voice_agent.generate_acknowledgment(text)
+        
+        session.add_message("ai", ack["text"], ack["timestamp"])
+        
+        ack_message = self.message_service.format_acknowledgment(
+            text=ack["text"],
+            audio_bytes=ack.get("audio_bytes", b""),
+        )
+        
+        await self.send_message(ack_message)
 
-    async def upload_interview_recording(self):
+        # Generate next question
+        await asyncio.sleep(0.5)
+        
+        question_msg = await self.orchestrator.generate_next_question(
+            session,
+            self.audio_recording
+        )
+
+        if question_msg:
+            await self.send_message(question_msg)
+        else:
+            await self.handle_stop(session)
+
+    async def handle_stop(self, session):
+        """Handle stop/end interview request"""
+        logger.info("Ending interview session")
+        
+        closing_msg = await self.orchestrator.end_session(
+            session,
+            self.audio_recording
+        )
+
+        if closing_msg:
+            await self.send_message(closing_msg)
+
+        # Wait for closing to play
+        await asyncio.sleep(12.0)
+
+        # Send completion message
+        completion_msg = self.message_service.format_interview_complete(
+            total_questions=session.current_question_number,
+            duration_seconds=session.get_session_duration(),
+        )
+        
+        await self.send_message(completion_msg)
+
+    async def handle_ping(self):
+        """Handle ping request"""
+        pong_msg = self.message_service.format_pong()
+        await self.send_message(pong_msg)
+
+    def _estimate_duration_seconds(self, byte_size: int) -> int:
         """
-        Combine all audio chunks and upload to R2
+        Estimate audio duration from Opus byte size.
+        Conservative on purpose.
         """
-        try:
-            if not self.audio_chunks or len(self.audio_chunks) == 0:
-                logger.warning("⚠️ No audio chunks to upload")
-                return
-        
-            logger.info(f"📼 Preparing to upload interview recording ({len(self.audio_chunks)} chunks)")
-        
-            # Combine all candidate audio chunks into one file
-            combined_audio = io.BytesIO()
-            total_size = 0
-        
-            for chunk in self.audio_chunks:
-                if chunk['speaker'] == 'candidate':  # Only save candidate audio
-                    combined_audio.write(chunk['data'])
-                    total_size += chunk['size']
-        
-            if total_size == 0:
-                logger.warning("⚠️ No candidate audio to upload")
-                return
-        
-            audio_bytes = combined_audio.getvalue()
-        
-            logger.info(f"📦 Combined audio: {len(audio_bytes)} bytes from {len([c for c in self.audio_chunks if c['speaker'] == 'candidate'])} chunks")
-        
-            # Upload to R2
-            result = await self.r2_storage.upload_recording(
-                interview_id=self.interview_id,
-                audio_data=audio_bytes,
-                file_type="webm",
-                metadata={
-                    'candidate_id': str(self.user_id),
-                    'question_count': str(self.current_question_number),
-                    'total_chunks': str(len(self.audio_chunks))
-                }
-            )
-        
-            if result:
-                logger.info(f"✅ Recording uploaded to R2")
-                logger.info(f"   URL: {result['public_url']}")
-            
-                # Save recording URL to interview document
-                await self.db.interviews.update_one(
-                    {"_id": ObjectId(self.interview_id)},
-                    {
-                        "$set": {
-                            "recording_url": result['public_url'],
-                            "recording_key": result['key'],
-                            "recording_size": result['size'],
-                            "updated_at": datetime.utcnow()
-                        }
-                    }
-                )
-            
-                logger.info(f"✅ Recording URL saved to database")
-            else:
-                logger.error("❌ Failed to upload recording to R2")
-    
-        except Exception as e:
-            logger.exception(f"❌ Error uploading interview recording: {e}")
+        bits = byte_size * 8
+        return int(bits / OPUS_BITRATE_BPS)
 
 
 @router.websocket("/ws/interview/{interview_id}/voice")
@@ -619,121 +204,145 @@ async def voice_interview_websocket(
     interview_id: str,
     db=Depends(get_database)
 ):
+    """
+    Voice interview WebSocket endpoint
+    
+    This is now a thin handler that just manages WebSocket I/O
+    All business logic is delegated to VoiceInterviewOrchestrator
+    """
     origin = websocket.headers.get("origin")
     client_host = websocket.client.host if websocket.client else "unknown"
+    
     logger.debug(
-        "WS handshake: interview=%s client=%s origin=%s",
-        interview_id, client_host, origin
+        f"WS handshake: interview={interview_id} client={client_host} origin={origin}"
     )
 
+    # =====================================================
+    # 1. AUTHENTICATION
+    # =====================================================
     try:
         token = websocket.query_params.get("token")
         user_id = await get_current_user_ws(websocket, token)
+        
         if not user_id:
-            logger.warning("WS auth failed for interview %s", interview_id)
+            logger.warning(f"WS auth failed for interview {interview_id}")
             try:
                 await websocket.close(code=4401)
             except Exception:
                 pass
             return
+            
     except Exception as e:
-        logger.exception("Exception during WS auth: %s", e)
+        logger.exception(f"Exception during WS auth: {e}")
         try:
             await websocket.close(code=1011)
         except Exception:
             pass
         return
 
+    # =====================================================
+    # 2. ACCEPT CONNECTION
+    # =====================================================
     await websocket.accept()
-    logger.info("🔌 WebSocket accepted: interview=%s user=%s", interview_id, user_id)
+    logger.info(f"🔌 WebSocket accepted: interview={interview_id} user={user_id}")
 
-    session = VoiceInterviewSession(
-        websocket=websocket,
-        interview_id=interview_id,
-        user_id=user_id,
-        db=db,
-        voice="aura-athena-en"
-    )
+    # =====================================================
+    # 3. INITIALIZE ORCHESTRATOR AND HANDLER
+    # =====================================================
+    orchestrator = VoiceInterviewOrchestrator(db)
+    handler = WebSocketHandler(websocket, orchestrator)
 
     try:
-        started = await session.start()
-        if not started:
+        # =====================================================
+        # 4. START SESSION
+        # =====================================================
+        success, session, error = await orchestrator.start_session(
+            interview_id=interview_id,
+            user_id=user_id,
+            voice="aura-athena-en"
+        )
+
+        if not success:
+            await handler.send_error(error or "Failed to start session")
             await websocket.close(code=1011)
             return
 
+        # =====================================================
+        # 5. SEND GREETING
+        # =====================================================
+        greeting_msg = await orchestrator.generate_greeting(session)
+        
+        if greeting_msg:
+            await handler.send_message(greeting_msg)
+        else:
+            await handler.send_error("Failed to send greeting")
+            await websocket.close(code=1011)
+            return
+
+        # =====================================================
+        # 6. MESSAGE LOOP
+        # =====================================================
         while session.is_active:
             message = await websocket.receive()
 
+            # Handle text messages
             if message.get("type") == "websocket.receive" and message.get("text"):
                 try:
                     data = json.loads(message["text"])
                 except Exception:
-                    logger.warning(
-                        "Invalid JSON received for interview %s",
-                        interview_id
-                    )
-                    await session.send_error("Invalid JSON")
+                    logger.warning(f"Invalid JSON received for interview {interview_id}")
+                    await handler.send_error("Invalid JSON")
                     continue
 
                 msg_type = data.get("type")
 
-                if msg_type == "stop":
-                    logger.info("Client requested stop for %s", interview_id)
-                    await session.send_closing()
-                    break
-
-                elif msg_type == "ping":
-                    await session.send_message({"type": "pong"})
-
-                elif msg_type == "greeting_ack":
-                    logger.info("Client acknowledged greeting — sending first question")
-                    asyncio.create_task(session.generate_and_send_next_question())
-
+                if msg_type == "greeting_ack":
+                    await handler.handle_greeting_ack(session)
 
                 elif msg_type == "text_answer":
                     text_answer = data.get("text", "")
+                    await handler.handle_text_answer(text_answer, session)
 
-                    await session.save_message("candidate", text_answer)
-                    session.conversation_history.append(
-                        ConversationMessage(
-                            speaker="candidate",
-                            text=text_answer,
-                            timestamp=datetime.utcnow().isoformat()
-                        )
-                    )
+                elif msg_type == "stop":
+                    logger.info(f"Client requested stop for {interview_id}")
+                    await handler.handle_stop(session)
+                    break
 
-                    await session.send_message(
-                        {"type": "transcription", "text": text_answer}
-                    )
+                elif msg_type == "ping":
+                    await handler.handle_ping()
 
-                    ack = await session.agent.generate_acknowledgment(text_answer)
-                    await session.send_audio_message(
-                        text=ack.get("text", ""),
-                        audio_bytes=ack.get("audio_bytes") or b"",
-                        message_type="acknowledgment",
-                    )
-
-                    session.conversation_history.append(
-                        ConversationMessage(
-                            speaker="ai",
-                            text=ack.get("text", ""),
-                            timestamp=ack.get("timestamp")
-                        )
-                    )
-
-                    await asyncio.sleep(0.5)
-                    await session.generate_and_send_next_question()
-
+            # Handle binary messages (audio)
             elif message.get("type") == "websocket.receive" and message.get("bytes"):
-                await session.process_answer(message["bytes"])
+                audio_bytes = message["bytes"]
+                size = len(audio_bytes)
+
+                if size > MAX_AUDIO_BYTES:
+                    estimated_seconds = handler._estimate_duration_seconds(size)
+                    max_seconds = handler._estimate_duration_seconds(MAX_AUDIO_BYTES)
+
+                    logger.warning(
+            f"Audio rejected early: {size} bytes (max {MAX_AUDIO_BYTES})"
+        )
+
+                    await handler.send_error(
+            error="Audio too long. Please keep answers shorter.",
+            code="AUDIO_LIMIT_EXCEEDED",
+        )
+
+        # 🚫 DO NOT process further
+                    continue
+
+    # ✅ ONLY valid audio reaches here
+                await handler.handle_audio_answer(audio_bytes, session)
+
 
     except WebSocketDisconnect:
-        logger.info("Client disconnected: %s", interview_id)
+        logger.info(f"Client disconnected: {interview_id}")
 
     except Exception as e:
-        logger.exception("Unhandled websocket error for %s: %s", interview_id, e)
+        logger.exception(f"Unhandled websocket error for {interview_id}: {e}")
         try:
-            await websocket.send_json({"type": "error", "message": "Server error"})
+            await handler.send_error("Server error")
         except Exception:
             pass
 
@@ -742,4 +351,7 @@ async def voice_interview_websocket(
             await websocket.close()
         except Exception:
             pass
-        logger.info("Websocket closed: %s", interview_id)
+        logger.info(f"WebSocket closed: {interview_id}")
+
+
+    

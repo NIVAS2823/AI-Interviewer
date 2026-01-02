@@ -1,62 +1,106 @@
-import json
+"""
+Question Generator Service (Refactored)
+Thin facade that delegates to specialized services
+
+This service is now a lightweight coordinator that uses:
+- GroqService for LLM calls
+- QuestionContextBuilder for context creation
+- DeduplicationService for filtering duplicates
+- TemplateQuestionService for fallbacks
+"""
 import logging
-from typing import List, Dict, Optional, Any
-from groq import Groq
-from app.core.config import settings
+from typing import List, Optional
+
 from app.models.interview import Question
 from app.models.resume import ParsedData
-
+from app.services.integration.groq_service import GroqService
+from app.services.domain.context_builder import QuestionContextBuilder
+from app.services.domain.deduplication_service import DeduplicationService
+from app.services.domain.template_question_service import TemplateQuestionService
 
 logger = logging.getLogger(__name__)
 
 
 class QuestionGeneratorService:
-    """Generate interview questions using FREE Groq AI"""
+    """
+    Refactored Question Generator - Now a thin facade
+    
+    Delegates to:
+    - GroqService: LLM API calls
+    - QuestionContextBuilder: Context building
+    - DeduplicationService: Duplicate filtering
+    - TemplateQuestionService: Fallback questions
+    
+    Responsibilities (reduced from 7 to 1):
+    - Coordinate question generation flow ONLY
+    """
 
-    def _safe_list(self, value: Any) -> List[str]:
-        """Convert skills/education/etc. into a safe list."""
-        if value is None:
-            return []
+    def __init__(
+        self,
+        groq_service: Optional[GroqService] = None,
+        context_builder: Optional[QuestionContextBuilder] = None,
+        deduplication_service: Optional[DeduplicationService] = None,
+        template_service: Optional[TemplateQuestionService] = None,
+    ):
+        """
+        Initialize with dependency injection
+        
+        Args:
+            groq_service: LLM service (optional, creates default)
+            context_builder: Context builder (optional, creates default)
+            deduplication_service: Deduplication service (optional, creates default)
+            template_service: Template service (optional, creates default)
+        """
+        self.groq = groq_service or GroqService()
+        self.context_builder = context_builder or QuestionContextBuilder()
+        self.dedupe = deduplication_service or DeduplicationService()
+        self.templates = template_service or TemplateQuestionService()
 
-        if isinstance(value, list):
-            return [str(v) for v in value if v]
-
-        # Sometimes parser returns Skills() object → convert to list
-        if hasattr(value, "__dict__"):
-            # extract any fields that look like lists
-            for k, v in value.__dict__.items():
-                if isinstance(v, list):
-                    return [str(x) for x in v]
-                if isinstance(v, str):
-                    return [v]
-
-        if isinstance(value, str):
-            return [value]
-
-        return []
-
-    def __init__(self):
-        """Initialize Groq client"""
-        self.client = None
-        if settings.GROQ_API_KEY:
-            self.client = Groq(api_key=settings.GROQ_API_KEY)
-            logger.info("✓ Question Generator initialized (Groq AI - FREE)")
+        if self.groq.is_available():
+            logger.info("✓ Question Generator initialized (Groq AI)")
         else:
-            logger.warning("⚠️ No GROQ_API_KEY found — using fallback questions")
+            logger.warning("⚠️ Groq unavailable — using template questions")
 
-    def _normalize_message(self, msg):
-        """Supports both dict and ConversationMessage objects."""
-        # ConversationMessage / Pydantic model
-        if hasattr(msg, "speaker") and hasattr(msg, "text"):
-            return msg.speaker, msg.text
+    async def generate_question(
+        self,
+        parsed_resume: ParsedData,
+        interview_type: str,
+        difficulty: str,
+        job_description: str = "",
+        asked_questions: Optional[List[str]] = None,
+        conversation_history: Optional[List[dict]] = None,
+    ) -> Optional[Question]:
+        """
+        Generate exactly ONE interview question
+        
+        Args:
+            parsed_resume: Parsed resume data
+            interview_type: Interview type
+            difficulty: Difficulty level
+            job_description: Job description text
+            asked_questions: Previously asked questions
+            conversation_history: Conversation history
+            
+        Returns:
+            Single Question or None
+        """
+        logger.info("🧠 Generating single interview question")
 
-        if isinstance(msg, dict):
-            # Standard dict structure
-            speaker = msg.get("speaker") or msg.get("role")
-            text = msg.get("text") or msg.get("content")
-            return speaker, text
+        questions = await self.generate_questions(
+            parsed_resume=parsed_resume,
+            interview_type=interview_type,
+            difficulty=difficulty,
+            max_questions=1,
+            job_description=job_description,
+            asked_questions=asked_questions or [],
+            conversation_history=conversation_history or [],
+        )
 
-        return None, None
+        if not questions:
+            logger.warning("⚠️ No question generated")
+            return None
+
+        return questions[0]
 
     async def generate_questions(
         self,
@@ -64,318 +108,360 @@ class QuestionGeneratorService:
         interview_type: str,
         difficulty: str,
         max_questions: int,
-        job_description: str,
+        job_description: str = "",
         asked_questions: Optional[List[str]] = None,
-        conversation_history: Optional[List[Dict]] = None,
+        conversation_history: Optional[List[dict]] = None,
     ) -> List[Question]:
-        """Generate interview questions with de-dupe support"""
-
+        """
+        Generate multiple interview questions with deduplication
+        
+        Args:
+            parsed_resume: Parsed resume data
+            interview_type: Interview type (technical, behavioral, hr, mixed)
+            difficulty: Difficulty level (easy, medium, hard)
+            max_questions: Maximum questions to generate
+            job_description: Job description text
+            asked_questions: Previously asked questions
+            conversation_history: Conversation history
+            
+        Returns:
+            List of unique Question objects
+        """
         asked_questions = asked_questions or []
         conversation_history = conversation_history or []
 
-        if not self.client or not settings.GROQ_API_KEY:
-            logger.warning("⚠️ Groq disabled — using template questions")
-            questions = self._generate_template_questions(interview_type, max_questions)
-            return self._filter_duplicates(questions, asked_questions)
+        logger.info(
+            f"🧠 Generating {max_questions} questions | "
+            f"type={interview_type} difficulty={difficulty}"
+        )
 
-        try:
-            context = self._build_resume_context(parsed_resume)
-
-            logger.info(
-                f"🧠 Generating {max_questions} questions | type={interview_type} difficulty={difficulty}"
-            )
-
-            questions = await self._generate_with_groq(
-                context,
-                job_description,
-                interview_type,
-                difficulty,
-                max_questions,
-                asked_questions,
-                conversation_history
-            )
-
-            # Remove duplicates using asked_questions + conversation
-            questions = self._filter_duplicates(questions, asked_questions)
-
-            # Ensure we have enough questions (fallback if needed)
-            while len(questions) < max_questions and self.client:
-                additional = await self._generate_with_groq(
-                    context, job_description, interview_type, difficulty,
-                    max_questions - len(questions), asked_questions, conversation_history
+        # Try AI generation first
+        if self.groq.is_available():
+            try:
+                questions = await self._generate_with_ai(
+                    parsed_resume=parsed_resume,
+                    interview_type=interview_type,
+                    difficulty=difficulty,
+                    max_questions=max_questions,
+                    job_description=job_description,
+                    asked_questions=asked_questions,
+                    conversation_history=conversation_history,
                 )
-                additional = self._filter_duplicates(additional, asked_questions)
-                questions.extend(additional[:max_questions - len(questions)])
-                break  # Prevent infinite loop
 
-            return questions[:max_questions]
+                # Filter duplicates
+                unique_questions = self.dedupe.filter_duplicate_questions(
+                    questions=questions,
+                    asked_questions=asked_questions,
+                    conversation_history=conversation_history,
+                )
 
-        except Exception as e:
-            logger.error(f"❌ Question generation error: {e}")
-            fallback = self._generate_template_questions(interview_type, max_questions)
-            return self._filter_duplicates(fallback, asked_questions)
+                # If we got enough unique questions, return them
+                if len(unique_questions) >= max_questions:
+                    return unique_questions[:max_questions]
 
-    def _filter_duplicates(
+                # Not enough? Try generating more
+                if len(unique_questions) < max_questions:
+                    logger.info(
+                        f"Only got {len(unique_questions)}/{max_questions} unique questions, "
+                        f"generating more..."
+                    )
+                    
+                    additional = await self._generate_with_ai(
+                        parsed_resume=parsed_resume,
+                        interview_type=interview_type,
+                        difficulty=difficulty,
+                        max_questions=max_questions - len(unique_questions),
+                        job_description=job_description,
+                        asked_questions=asked_questions + [q.question_text for q in unique_questions],
+                        conversation_history=conversation_history,
+                    )
+
+                    additional_unique = self.dedupe.filter_duplicate_questions(
+                        questions=additional,
+                        asked_questions=asked_questions + [q.question_text for q in unique_questions],
+                        conversation_history=conversation_history,
+                    )
+
+                    unique_questions.extend(additional_unique)
+
+                return unique_questions[:max_questions]
+
+            except Exception as e:
+                logger.error(f"❌ AI generation failed: {e}, falling back to templates")
+
+        # Fallback to template questions
+        logger.info("📝 Using template questions (AI unavailable)")
+        template_questions = self.templates.get_questions(
+            interview_type=interview_type,
+            max_questions=max_questions * 2,  # Get extras for deduplication
+            difficulty=difficulty,
+        )
+
+        # Filter template duplicates too
+        unique_templates = self.dedupe.filter_duplicate_questions(
+            questions=template_questions,
+            asked_questions=asked_questions,
+            conversation_history=conversation_history,
+        )
+
+        return unique_templates[:max_questions]
+
+    async def _generate_with_ai(
         self,
-        questions: List[Question],
-        asked_questions: List[str]
-    ) -> List[Question]:
-        """Remove exact & approximate duplicates."""
-        clean = []
-
-        for q in questions:
-            if not q.question_text:  # Skip empty questions
-                continue
-
-            qtext = q.question_text.strip().lower()
-
-            # Exact repeat?
-            if any(qtext == x.lower().strip() for x in asked_questions):
-                logger.info(f"⛔ Skipping duplicate question: {qtext[:80]}...")
-                continue
-
-            # Approximate repeat (first 6 words match)
-            is_duplicate = False
-            for asked in asked_questions:
-                asked_words = asked.lower().strip().split()[:6]
-                q_words = qtext.split()[:6]
-                if len(asked_words) >= 4 and len(q_words) >= 4 and asked_words == q_words:
-                    logger.info(f"⛔ Skipping near-duplicate question: {qtext[:80]}...")
-                    is_duplicate = True
-                    break
-
-            if not is_duplicate:
-                clean.append(q)
-
-        return clean
-
-    def _build_resume_context(self, resume: ParsedData) -> str:
-        logger.info("📄 Building resume context")
-
-        skills = self._safe_list(resume.skills)
-        exp = resume.experience or []
-        edu = resume.education or []
-        proj = resume.projects or []
-
-        parts = []
-
-        if resume.name:
-            parts.append(f"Name: {resume.name}")
-
-        if skills:
-            parts.append(f"Skills: {', '.join(skills[:10])}")
-
-        if exp:
-            exp_lines = []
-            for e in exp[:3]:
-                role = getattr(e, "role", "N/A")
-                company = getattr(e, "company", "N/A")
-                duration = getattr(e, "duration", "N/A")
-                exp_lines.append(f"{role} at {company} ({duration})")
-            parts.append(f"Experience: {'; '.join(exp_lines)}")
-
-        if edu:
-            edu_lines = []
-            for e in edu[:2]:
-                degree = getattr(e, "degree", "N/A")
-                field = getattr(e, "field", "N/A")
-                inst = getattr(e, "institution", "N/A")
-                edu_lines.append(f"{degree} in {field} from {inst}")
-            parts.append(f"Education: {'; '.join(edu_lines)}")
-
-        if proj:
-            names = [getattr(p, "name", "Project") for p in proj[:3]]
-            parts.append(f"Projects: {', '.join(names)}")
-
-        return "\n".join(parts) or "No resume data available."
-
-    async def _generate_with_groq(
-        self,
-        resume_context: str,
-        job_description: str,
+        parsed_resume: ParsedData,
         interview_type: str,
         difficulty: str,
         max_questions: int,
+        job_description: str,
         asked_questions: List[str],
-        conversation_history: List[Dict]
+        conversation_history: List[dict],
     ) -> List[Question]:
-        """Generate questions using Groq AI"""
+        """
+        Generate questions using AI (delegates to GroqService)
+        
+        Args:
+            All parameters needed for generation
+            
+        Returns:
+            List of generated questions (may contain duplicates)
+        """
+        # Build context using QuestionContextBuilder
+        resume_context = self.context_builder.build_resume_context(parsed_resume)
+        job_context = self.context_builder.build_job_description_context(job_description)
+        conv_context = self.context_builder.build_conversation_context(conversation_history)
 
-        logger.info("⚡ Calling Groq LLaMA-3.3-70B to generate questions")
-
-        # Format conversation history for prompt
-        conv_summary = ""
-        if conversation_history:
-            lines = []
-            for msg in conversation_history[-4:]:  # Last 4 messages
-                speaker, text = self._normalize_message(msg)
-                if not text:
-                    continue
-
-                if speaker in ["candidate", "user"]:
-                    lines.append(f"CANDIDATE: {text[:100]}...")
-                elif speaker in ["ai", "assistant"]:
-                    lines.append(f"INTERVIEWER: {text[:100]}...")
-
-                if len(lines) >= 3:  # limit
-                    break
-
-            conv_summary = "\n".join(lines)
-
+        # Build asked questions summary
         asked_summary = "; ".join(asked_questions[-5:]) if asked_questions else "None"
 
-        prompt = f"""You are an expert interviewer. Your job is to generate highly diverse, non-repetitive, 
-context-aware interview questions based on the Job Description (JD) and the Candidate Resume.
+        # Construct comprehensive prompt
+        prompt = self._build_generation_prompt(
+            resume_context=resume_context,
+            job_context=job_context,
+            conversation_context=conv_context,
+            interview_type=interview_type,
+            difficulty=difficulty,
+            max_questions=max_questions,
+            asked_summary=asked_summary,
+        )
 
-GOALS:
-1. Produce UNIQUE, NON-REPEATING questions (avoid anything similar to earlier questions).
-2. Questions must be HIGH-QUALITY, job-relevant, and focused on the JD + Resume.
-3. Adapt question style based on interview_type:
-   - technical → ask DIRECT technical questions (definitions, concepts, coding fundamentals,
-     implementation questions, API usage, OOP, DBMS, DSA, frameworks like FastAPI, Django, 
-     React, JVM, JDBC, AWS, etc.). 
-     Examples:
-       • "What is a constructor in OOP?"
-       • "Explain polymorphism."
-       • "What is JDBC and how does it work?"
-       • "How does FastAPI handle dependency injection?"
-       • "Explain ACID properties."
-       • "Difference between threads and processes."
-       • "Explain event loop in Python."
-   - behavioral → ask scenario-based, experience-based questions.
-   - hr → ask motivation, expectations, culture-fit questions.
-   - mixed → combine all types but still ensure variety.
+        # System prompt for structured output
+        system_prompt = f"""
+You are an expert AI interviewer that generates professional interview questions based on the given **category** and **difficulty level**.
 
-STRICT RULES:
-1. DO NOT repeat or rephrase any previously asked question.
-2. Every question MUST follow a DIFFERENT pattern. Examples:
-   - direct knowledge check
-   - compare X vs Y
-   - explain workflow
-   - debug scenario
-   - why/how reasoning
-   - architecture or design choices
-   - performance optimization
-   - "when did you last..." experience questions
-   - "walk me through..." methodological questions
-   - hypothetical "how would you approach…" questions
-3. Avoid starting more than one question with the same phrase.
-4. Cover multiple dimensions:
-   - core technical concepts
-   - applied project experience
-   - tools/frameworks in resume
-   - job-specific responsibilities from JD
-   - performance, optimization, debugging
-   - system design or API design (if relevant)
-5. Output MUST be valid JSON only.
+Your job is to ASK QUESTIONS ONLY (do not answer them).
 
-CONTEXT:
-Job Description: {job_description}
-
-Candidate Resume:
-{resume_context}
-
-Previously Asked Questions: {asked_summary}
-
-Recent Conversation: {conv_summary}
-
-Generate exactly {max_questions} diverse questions in this JSON format:
+========================
+STRICT OUTPUT REQUIREMENTS
+========================
+- Always return valid JSON in this exact format:
 {{
   "questions": [
     {{
-      "question_text": "Full question here",
-      "category": "technical|behavioral|hr|mixed",
+      "question_text": "<the interview question>",
+      "category": "technical|hr|mixed",
       "difficulty": "{difficulty}",
-      "expected_topics": ["topic1", "topic2"]
+      "expected_topics": ["<list of related topics>"]
     }}
   ]
-}}"""
+}}
+- Output exactly ONE question per response.
+- The "category" field MUST match the given category parameter.
+- Never include explanatory text, reasoning, or any text outside of the JSON.
 
-        try:
-            chat_completion = self.client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": "You are an expert interviewer. Return ONLY valid JSON response. No explanations."},
-                    {"role": "user", "content": prompt}
-                ],
-                model="llama-3.3-70b-versatile",
-                temperature=0.7,
-                max_tokens=2000,
-            )
+========================
+CATEGORY RULES
+========================
+If category = "technical":
+- Focus only on technology, programming, systems, or software concepts.
+If category = "hr":
+- Focus on soft skills, personality, work ethics, leadership, and culture-fit.
+If category = "mixed":
+- Combine both technical and HR question styles.
 
-            response_text = chat_completion.choices[0].message.content.strip()
+========================
+DIFFICULTY RULES
+========================
+EASY:
+- Ask simple, definition-based or factual questions.
+- Focus on “What is”, “Define”, “Purpose of”, etc.
+- Avoid scenarios, system design, and optimization.
+- Example (technical): "What is polymorphism in Python?"
+- Example (hr): "What motivates you at work?"
 
-            # Clean JSON response - remove markdown code blocks
-            if response_text.startswith("```"):
-                # Remove opening ```json or ```
-                response_text = response_text.split("\n", 1)[1] if "\n" in response_text else response_text[3:]
-            if response_text.endswith("```"):
-                # Remove closing ```
-                response_text = response_text.rsplit("\n", 1)[0] if "\n" in response_text else response_text[:-3]
-            
-            response_text = response_text.strip()
+MEDIUM:
+- Ask application-based or comparative questions.
+- Focus on “How does”, “When would you use”, “Explain the difference between”.
+- Avoid large-scale designs.
+- Example (technical): "How does dependency injection work in FastAPI?"
+- Example (hr): "Describe a time you had to resolve a team conflict."
 
-            data = json.loads(response_text)
+HARD:
+- Ask design, optimization, scalability, or trade-off questions.
+- Include architectural, analytical, or strategic elements.
+- Example (technical): "How would you design a scalable notification system?"
+- Example (hr): "How would you lead a remote team through a critical deadline?"
 
-            questions = []
-            for q_data in data.get("questions", [])[:max_questions]:
-                if q_data.get("question_text"):  # Validate
-                    questions.append(
-                        Question(
-                            question_text=q_data.get("question_text", ""),
-                            category=q_data.get("category", interview_type),
-                            difficulty=q_data.get("difficulty", difficulty),
-                            expected_topics=q_data.get("expected_topics", [])
-                        )
+========================
+IMPORTANT CONSTRAINTS
+========================
+- Never exceed the difficulty level. Asking a harder question than assigned is a FAILURE.
+- Always respect both the difficulty and category simultaneously.
+- Keep questions professional, clear, and single-focused.
+"""
+
+        # Call Groq API
+        logger.info("⚡ Calling Groq AI for question generation")
+
+        response_data = await self.groq.generate_structured_response(
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            expected_fields=["questions"],
+            temperature=0.8,
+            max_tokens=2000,
+        )
+
+        if not response_data or "questions" not in response_data:
+            logger.error("❌ Invalid response from Groq")
+            return []
+
+        # Parse questions
+        questions = []
+        for q_data in response_data["questions"][:max_questions]:
+            if q_data.get("question_text"):
+                try:
+                    question = Question(
+                        question_text=q_data["question_text"],
+                        category=q_data.get("category", interview_type),
+                        difficulty=q_data.get("difficulty", difficulty),
+                        expected_topics=q_data.get("expected_topics", []),
                     )
+                    questions.append(question)
+                except Exception as e:
+                    logger.warning(f"Failed to parse question: {e}")
 
-            logger.info(f"✅ Generated {len(questions)} questions successfully")
-            return questions
+        logger.info(f"✅ Generated {len(questions)} questions from AI")
+        return questions
 
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ Invalid JSON from Groq: {e}\nResponse: {response_text[:200]}")
-            raise
-        except Exception as e:
-            logger.error(f"❌ Groq question generation error: {e}")
-            raise
-
-    def _generate_template_questions(
+    def _build_generation_prompt(
         self,
+        resume_context: str,
+        job_context: str,
+        conversation_context: str,
         interview_type: str,
-        max_questions: int
-    ) -> List[Question]:
-        """Fallback template questions"""
+        difficulty: str,
+        max_questions: int,
+        asked_summary: str,
+    ) -> str:
+        """
+        Build comprehensive prompt for question generation
+        
+        Args:
+            All context components
+            
+        Returns:
+            Complete prompt string
+        """
+        prompt_parts = [
+            "Generate highly diverse, non-repetitive interview questions.",
+            "",
+            "=== GOALS ===",
+            "1. Produce UNIQUE questions (avoid anything similar to previous questions)",
+            "2. High-quality, job-relevant questions focused on JD + Resume",
+            "3. Adapt to interview type:",
+        ]
 
-        logger.warning(f"⚠️ Using template questions for type={interview_type}")
+        # Add type-specific instructions
+        if interview_type == "technical":
+            prompt_parts.extend([
+                "   - Ask DIRECT technical questions",
+                "   - Cover: definitions, concepts, coding, frameworks, databases, system design",
+                "   - Examples: 'What is X?', 'Explain Y', 'How does Z work?'",
+            ])
+        elif interview_type == "behavioral":
+            prompt_parts.extend([
+                "   - Ask scenario-based, experience questions",
+                "   - Use STAR format prompts",
+                "   - Examples: 'Tell me about a time when...', 'Describe a situation where...'",
+            ])
+        elif interview_type == "hr":
+            prompt_parts.extend([
+                "   - Ask motivation, expectations, culture-fit questions",
+                "   - Examples: 'Why this role?', 'Career goals?', 'Salary expectations?'",
+            ])
+        else:  # mixed
+            prompt_parts.append("   - Combine technical, behavioral, and HR questions")
 
-        templates = {
-            "technical": [
-                Question(question_text="Tell me about your experience with the technologies listed in your resume.", category="technical", difficulty="medium", expected_topics=["experience", "technologies"]),
-                Question(question_text="Describe a challenging technical problem you solved recently.", category="technical", difficulty="medium", expected_topics=["problem-solving", "technical skills"]),
-                Question(question_text="How do you approach debugging complex issues?", category="technical", difficulty="medium", expected_topics=["debugging", "methodology"]),
-                Question(question_text="Explain your experience with version control and collaboration.", category="technical", difficulty="easy", expected_topics=["git", "collaboration"]),
-                Question(question_text="What's your experience with testing and quality assurance?", category="technical", difficulty="medium", expected_topics=["testing", "quality"]),
-            ],
-            "behavioral": [
-                Question(question_text="Tell me about yourself and your professional background.", category="behavioral", difficulty="easy", expected_topics=["background", "experience"]),
-                Question(question_text="Describe a time when you had to work with a difficult team member.", category="behavioral", difficulty="medium", expected_topics=["teamwork", "conflict resolution"]),
-                Question(question_text="Tell me about a project you're most proud of.", category="behavioral", difficulty="medium", expected_topics=["achievement", "pride"]),
-                Question(question_text="How do you handle tight deadlines and pressure?", category="behavioral", difficulty="medium", expected_topics=["stress management", "time management"]),
-                Question(question_text="Describe a situation where you had to learn something new quickly.", category="behavioral", difficulty="medium", expected_topics=["learning", "adaptability"]),
-            ],
-            "hr": [
-                Question(question_text="Why are you interested in this position?", category="hr", difficulty="easy", expected_topics=["motivation", "interest"]),
-                Question(question_text="What are your salary expectations?", category="hr", difficulty="easy", expected_topics=["compensation"]),
-                Question(question_text="Where do you see yourself in 5 years?", category="hr", difficulty="medium", expected_topics=["career goals"]),
-                Question(question_text="What is your notice period?", category="hr", difficulty="easy", expected_topics=["availability"]),
-                Question(question_text="Why are you looking to leave your current role?", category="hr", difficulty="medium", expected_topics=["motivation", "career change"]),
-            ],
-            "mixed": [
-                Question(question_text="Tell me about yourself and your technical background.", category="behavioral", difficulty="easy", expected_topics=["background", "introduction"]),
-                Question(question_text="Describe a challenging technical project you worked on.", category="technical", difficulty="medium", expected_topics=["project", "challenges"]),
-                Question(question_text="How do you stay updated with new technologies?", category="behavioral", difficulty="medium", expected_topics=["learning", "growth"]),
-                Question(question_text="What motivates you in your career?", category="hr", difficulty="medium", expected_topics=["motivation", "career"]),
-                Question(question_text="Tell me about your experience working in teams.", category="behavioral", difficulty="medium", expected_topics=["teamwork", "collaboration"]),
-            ]
+        # Add contexts
+        prompt_parts.extend([
+            "",
+            "=== CANDIDATE RESUME ===",
+            resume_context,
+            "",
+        ])
+
+        if job_context:
+            prompt_parts.extend([
+                "=== JOB DESCRIPTION ===",
+                job_context,
+                "",
+            ])
+
+        if conversation_context:
+            prompt_parts.extend([
+                "=== RECENT CONVERSATION ===",
+                conversation_context,
+                "",
+            ])
+
+        prompt_parts.extend([
+            f"=== PREVIOUSLY ASKED ===",
+            asked_summary,
+            "",
+            f"Generate exactly {max_questions} diverse questions.",
+        ])
+
+        return "\n".join(prompt_parts)
+
+    def get_opening_question(self, interview_type: str) -> Question:
+        """
+        Get a good opening question
+        
+        Args:
+            interview_type: Interview type
+            
+        Returns:
+            Opening question
+        """
+        return self.templates.get_opening_question(interview_type)
+
+    def get_closing_question(self, interview_type: str) -> Question:
+        """
+        Get a good closing question
+        
+        Args:
+            interview_type: Interview type
+            
+        Returns:
+            Closing question
+        """
+        return self.templates.get_closing_question(interview_type)
+
+    def calculate_question_quality(self, questions: List[Question]) -> dict:
+        """
+        Calculate quality metrics for generated questions
+        
+        Args:
+            questions: Questions to analyze
+            
+        Returns:
+            Dict with quality metrics
+        """
+        diversity_score = self.dedupe.calculate_question_diversity(questions)
+        pattern_analysis = self.dedupe.detect_question_patterns(questions)
+
+        return {
+            "total_questions": len(questions),
+            "diversity_score": round(diversity_score, 2),
+            "pattern_analysis": pattern_analysis,
+            "quality_rating": "excellent" if diversity_score > 0.7 else "good" if diversity_score > 0.5 else "poor",
         }
-
-        return templates.get(interview_type, templates["mixed"])[:max_questions]

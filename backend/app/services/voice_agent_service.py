@@ -1,76 +1,86 @@
 """
-Voice Agent Service - AI Interviewer Brain
-Optimized for FAST startup:
-- Sends greeting immediately
-- Loads acknowledgment cache in background
-- Generates first question AFTER greeting
-"""
+Voice Agent Service (Refactored)
+Thin coordinator for voice interview operations
 
+Now delegates to specialized services:
+- VoiceSynthesisService: TTS operations
+- VoiceMessageGenerator: Message text generation
+- STTService: Speech-to-text
+- AudioCacheService: Audio caching
+- ResponseService: Acknowledgment texts
+"""
 import logging
-import random
-import asyncio
 from typing import Optional, Dict, Any
 from datetime import datetime
 
 from app.services.stt_service import STTService
 from app.services.deepgram_tts_service import DeepgramTTSService as TTSService
-from app.services.question_generator import QuestionGeneratorService
+from app.services.voice.audio_cache_service import AudioCacheService
+from app.services.voice.voice_message_generator import VoiceMessageGenerator
+from app.services.voice.voice_synthesis_service import VoiceSynthesisService
+from app.services.domain.response_service import ResponseService
 from app.models.interview import Question
-from app.models.resume import ParsedData
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class VoiceAgentService:
+    """
+    Voice Agent Service - Thin Coordinator
+    
+    Responsibilities (ONLY):
+    - Coordinate voice operations
+    - Delegate to specialized services
+    
+    Does NOT:
+    - Generate message text (VoiceMessageGenerator)
+    - Handle TTS directly (VoiceSynthesisService)
+    - Manage cache (AudioCacheService)
+    - Generate questions (QuestionService)
+    """
 
-    DEFAULT_VOICE = "aura-athena-en"   # Updated
+    DEFAULT_VOICE = "aura-athena-en"
 
     def __init__(self):
+        """Initialize voice agent with all required services"""
+        # Core services
         self.stt = STTService()
         self.tts = TTSService()
-        self.question_generator = QuestionGeneratorService()
-
-        self.ack_cache = {}
-        self.ack_texts = [
-            "Thank you for that answer.",
-            "I appreciate your response.",
-            "That's helpful to know.",
-            "I see, thank you.",
-            "Interesting perspective.",
-            "Great, let's continue.",
-            "Understood, thank you.",
-        ]
+        
+        # Voice-specific services
+        self.message_generator = VoiceMessageGenerator(interviewer_name="Sarah")
+        self.voice_synthesis = VoiceSynthesisService(
+            tts_service=self.tts,
+            audio_cache=AudioCacheService(self.tts),
+        )
+        self.response_service = ResponseService()
 
         logger.info("🤖 Voice Agent initialized")
         logger.info(f"   STT: {'✅' if self.stt.client else '❌'}")
         logger.info(f"   TTS: {'✅' if self.tts.api_key else '❌'}")
         logger.info(f"   AI: {'✅' if settings.GROQ_API_KEY else '❌'}")
 
-    # =====================================================================
-    # ACK CACHE — NOW ASYNC BACKGROUND TASK
-    # =====================================================================
     async def initialize_ack_cache(self, voice: Optional[str] = None):
-        """Pre-generate acknowledgment audio WITHOUT blocking greeting."""
-        logger.info("🎤 Background: Generating acknowledgment audio cache...")
+        """
+        Pre-generate acknowledgment audio cache in background
+        
+        Args:
+            voice: Voice model to use
+        """
+        voice = voice or self.DEFAULT_VOICE
+        
+        logger.info("🎤 Initializing acknowledgment cache in background...")
 
-        chosen_voice = voice or self.DEFAULT_VOICE
+        # Get acknowledgment texts from ResponseService
+        ack_texts = self.response_service.ACKNOWLEDGMENTS
 
-        for ack_text in self.ack_texts:
-            try:
-                audio_bytes = await self.tts.synthesize_speech(
-                    text=ack_text, voice_name=chosen_voice
-                )
-                self.ack_cache[ack_text] = audio_bytes
-                logger.info(f"   ✅ Cached: '{ack_text}' ({len(audio_bytes)} bytes)")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to cache '{ack_text}': {e}")
+        # Preload cache in background
+        await self.voice_synthesis.preload_cache_background(
+            texts=ack_texts,
+            voice=voice,
+        )
 
-        logger.info(f"✅ Background cache ready ({len(self.ack_cache)} entries)")
-
-    # =====================================================================
-    # GREETING — FIRST THING SENT
-    # =====================================================================
     async def generate_greeting(
         self,
         candidate_name: str,
@@ -78,17 +88,34 @@ class VoiceAgentService:
         num_questions: int,
         voice: Optional[str] = None,
     ) -> Dict[str, Any]:
-
-        greeting_text = (
-            f"Hello {candidate_name}! I'm Sarah, your AI interviewer. "
-            f"This will be a {interview_type} interview with {num_questions} questions. "
-            f"Please answer clearly and take your time. Let's begin!"
-        )
+        """
+        Generate greeting message with audio
+        
+        Args:
+            candidate_name: Candidate's name
+            interview_type: Interview type
+            num_questions: Number of questions
+            voice: Voice model
+            
+        Returns:
+            Dict with text and audio_bytes
+        """
+        voice = voice or self.DEFAULT_VOICE
 
         logger.info(f"👋 Generating greeting for '{candidate_name}'")
 
-        audio_bytes = await self.tts.synthesize_speech(
-            text=greeting_text, voice_name=voice or self.DEFAULT_VOICE
+        # Generate text
+        greeting_text = self.message_generator.create_greeting_text(
+            candidate_name=candidate_name,
+            interview_type=interview_type,
+            num_questions=num_questions,
+        )
+
+        # Synthesize audio
+        audio_bytes = await self.voice_synthesis.synthesize(
+            text=greeting_text,
+            voice=voice,
+            use_cache=False,  # Don't cache personalized greetings
         )
 
         return {
@@ -98,12 +125,10 @@ class VoiceAgentService:
             "message_type": "greeting",
         }
 
-    # =====================================================================
-    # QUESTION GENERATION — FAST & SINGLE CALL
-    # =====================================================================
+    
     async def generate_and_synthesize_question(
         self,
-        resume: ParsedData,
+        resume,
         job_description: Optional[str],
         conversation_history: list,
         interview_type: str,
@@ -112,23 +137,45 @@ class VoiceAgentService:
         total_questions: int,
         voice: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
+        """
+        Synthesize question audio (question already generated by QuestionService)
+        
+        Note: This method maintains backward compatibility but should ideally
+        be replaced with separate question generation + TTS calls
+        
+        Args:
+            All question generation parameters
+            voice: Voice model
+            
+        Returns:
+            Dict with question and audio
+        """
+        voice = voice or self.DEFAULT_VOICE
 
         logger.info(f"🚀 Generating question {question_number}/{total_questions}")
 
         try:
+            # Import here to avoid circular dependency
+            from app.services.question_generator import QuestionGeneratorService
+            
+            question_generator = QuestionGeneratorService()
+
+            # Get asked questions from conversation
             asked_questions = [
                 msg.text for msg in conversation_history
                 if msg.speaker == "ai"
             ]
 
-            questions = await self.question_generator.generate_questions(
+            normalized_conversation = self._normalize_conversation_for_ai(conversation_history)
+            # Generate question
+            questions = await question_generator.generate_questions(
                 parsed_resume=resume,
                 interview_type=interview_type,
                 difficulty=difficulty,
                 max_questions=1,
-                job_description=job_description,
+                job_description=job_description or "",
                 asked_questions=asked_questions,
-                conversation_history=conversation_history,
+                conversation_history=normalized_conversation,
             )
 
             if not questions:
@@ -137,9 +184,11 @@ class VoiceAgentService:
 
             question = questions[0]
 
-            audio_bytes = await self.tts.synthesize_speech(
+            # Synthesize audio
+            audio_bytes = await self.voice_synthesis.synthesize(
                 text=question.question_text,
-                voice_name=voice or self.DEFAULT_VOICE
+                voice=voice,
+                use_cache=False,  # Don't cache questions
             )
 
             return {
@@ -156,10 +205,61 @@ class VoiceAgentService:
             logger.exception(f"❌ Question generation failed: {e}")
             return None
 
-    # =====================================================================
-    # PROCESS ANSWER
-    # =====================================================================
+    async def synthesize_question_audio(
+        self,
+        question: Question,
+        voice: Optional[str] = None,
+    ) -> bytes:
+        """
+        Synthesize audio for a question (preferred method)
+        
+        Args:
+            question: Question object
+            voice: Voice model
+            
+        Returns:
+            Audio bytes
+        """
+        voice = voice or self.DEFAULT_VOICE
+
+        return await self.voice_synthesis.synthesize(
+            text=question.question_text,
+            voice=voice,
+            use_cache=False,
+        )
+
+    async def ask_question(self, question: Question) -> Dict[str, Any]:
+        """
+        Legacy method for backward compatibility
+        Synthesizes question audio
+        
+        Args:
+            question: Question object
+            
+        Returns:
+            Dict with text and audio
+        """
+        audio_bytes = await self.synthesize_question_audio(question)
+
+        return {
+            "text": question.question_text,
+            "audio_bytes": audio_bytes,
+            "category": question.category,
+            "difficulty": question.difficulty,
+            "timestamp": datetime.utcnow().isoformat(),
+            "message_type": "question",
+        }
+
     async def process_answer(self, audio_bytes: bytes) -> Optional[str]:
+        """
+        Process candidate's audio answer (STT)
+        
+        Args:
+            audio_bytes: Audio data
+            
+        Returns:
+            Transcript text or None
+        """
         if not audio_bytes:
             return None
 
@@ -171,50 +271,71 @@ class VoiceAgentService:
             logger.exception(f"❌ STT error: {e}")
             return None
 
-    # =====================================================================
-    # ACK (uses cached audio instantly)
-    # =====================================================================
     async def generate_acknowledgment(
         self,
         answer: str,
-        voice: Optional[str] = None
+        voice: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """
+        Generate acknowledgment with cached audio
+        
+        Args:
+            answer: Candidate's answer (currently not used for selection)
+            voice: Voice model
+            
+        Returns:
+            Dict with acknowledgment text and audio
+        """
+        voice = voice or self.DEFAULT_VOICE
 
-        ack_text = random.choice(self.ack_texts)
+        # Get random acknowledgment text from ResponseService
+        ack_text = self.response_service.get_acknowledgment()
+
         logger.info("💬 Sending acknowledgment")
 
-        audio_bytes = self.ack_cache.get(ack_text)
-
-        if not audio_bytes:  # fallback
-            audio_bytes = await self.tts.synthesize_speech(
-                text=ack_text,
-                voice_name=voice or self.DEFAULT_VOICE
-            )
+        # Try to get cached audio
+        audio_bytes = await self.voice_synthesis.synthesize(
+            text=ack_text,
+            voice=voice,
+            use_cache=True,  # Use cache for acknowledgments
+        )
 
         return {
             "text": ack_text,
-            "audio_bytes": audio_bytes,
+            "audio_bytes": audio_bytes or b"",
             "timestamp": datetime.utcnow().isoformat(),
             "message_type": "acknowledgment",
         }
 
-    # =====================================================================
-    # CLOSING
-    # =====================================================================
     async def generate_closing(
         self,
         candidate_name: str,
-        voice: Optional[str] = None
+        voice: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """
+        Generate closing message with audio
+        
+        Args:
+            candidate_name: Candidate's name
+            voice: Voice model
+            
+        Returns:
+            Dict with closing text and audio
+        """
+        voice = voice or self.DEFAULT_VOICE
 
-        closing_text = (
-            f"Thank you, {candidate_name}, for your time. "
-            f"We'll now evaluate your answers. Good luck!"
+        logger.info(f"👋 Generating closing for '{candidate_name}'")
+
+        # Generate text
+        closing_text = self.message_generator.create_closing_text(
+            candidate_name=candidate_name,
         )
 
-        audio_bytes = await self.tts.synthesize_speech(
+        # Synthesize audio
+        audio_bytes = await self.voice_synthesis.synthesize(
             text=closing_text,
-            voice_name=voice or self.DEFAULT_VOICE
+            voice=voice,
+            use_cache=False,  # Don't cache personalized closings
         )
 
         return {
@@ -223,3 +344,44 @@ class VoiceAgentService:
             "timestamp": datetime.utcnow().isoformat(),
             "message_type": "closing",
         }
+
+    def get_agent_stats(self) -> Dict[str, Any]:
+        """
+        Get agent statistics
+        
+        Returns:
+            Dict with agent stats
+        """
+        return {
+            "stt_available": self.stt.client is not None,
+            "tts_available": self.tts.api_key is not None,
+            "groq_available": bool(settings.GROQ_API_KEY),
+            "default_voice": self.DEFAULT_VOICE,
+            "synthesis_stats": self.voice_synthesis.get_synthesis_stats(),
+        }
+
+    def clear_cache(self, voice: Optional[str] = None):
+        """
+        Clear audio cache
+        
+        Args:
+            voice: Optional voice to clear
+        """
+        self.voice_synthesis.clear_cache(voice)
+        logger.info(f" Cache cleared for voice: {voice or 'all'}")
+
+    def _normalize_conversation_for_ai(self, conversation_history):
+        """
+        Convert ConversationMessage objects into dicts
+        expected by QuestionContextBuilder / AI layer
+        """
+        normalized = []
+
+        for msg in conversation_history:
+            normalized.append({
+                "speaker": msg.speaker,
+                "text": msg.text,
+                "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+            })
+
+        return normalized
