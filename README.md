@@ -4,7 +4,7 @@ An intelligent, automated interview system powered by VideoSDK agents and advanc
 
 ## 🚀 Features
 
-- **AI-Powered Video Interviews**: Real-time interviews with AI agents (avatar + voice)
+- **AI-Powered Video Interviews**: Real-time interviews with AI agents ( voice)
 - **Intelligent Question Generation**: Based on resumes and job descriptions
 - **Automated Scoring & Feedback**: Comprehensive evaluation with detailed insights
 - **Candidate Pipeline Management**: For HR teams to manage screening workflows
@@ -119,12 +119,6 @@ See `.env.example` files for required configuration:
 - AI service credentials (Claude, Deepgram, ElevenLabs)
 - JWT secret key
 
-## 📖 Documentation
-
-- [Architecture Overview](docs/architecture.md)
-- [API Reference](docs/api.md)
-- [Database Schema](docs/database.md)
-- [Deployment Guide](docs/deployment.md)
 
 ## 🤝 Contributing
 
