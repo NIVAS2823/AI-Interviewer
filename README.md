@@ -15,7 +15,7 @@ An intelligent, automated interview system powered by VideoSDK agents and advanc
 - **Backend**: FastAPI (Python 3.10+)
 - **Frontend**: React 18 + Vite
 - **Databases**: MongoDB (primary), Redis (cache)
-- **Video/AI**: VideoSDK Agents, LLAMA , Deepgram (STT), Cogli (TTS)
+- **Meeting/AI**: VideoSDK Agents, LLAMA , Deepgram (STT), Cogli (TTS)
 - **Infrastructure**: Docker, Docker Compose
 
 ## 📋 Prerequisites
@@ -63,32 +63,7 @@ docker-compose ps
 - **MongoDB**: localhost:27017
 - **Redis**: localhost:6379
 
-## 📦 Available Commands
-```bash
-make up          # Start all services
-make down        # Stop all services
-make restart     # Restart all services
-make logs        # View logs from all services
-make logs-backend # View backend logs only
-make logs-frontend # View frontend logs only
-make status      # Check service status
-make clean       # Remove all containers and volumes
-make test        # Run all tests
-make shell-backend # Enter backend container shell
-make shell-db    # Enter MongoDB shell
-```
 
-## 🧪 Running Tests
-```bash
-# Backend tests
-make test-backend
-
-# Frontend tests
-make test-frontend
-
-# All tests
-make test
-```
 
 ## 📚 Project Structure
 ```
@@ -158,13 +133,3 @@ See `.env.example` files for required configuration:
 3. Commit your changes (`git commit -m 'Add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
-
-## 📄 License
-
-MIT License - see LICENSE file for details
-
-## 📞 Support
-
-- Email: support@aiinterviewer.com
-- Issues: GitHub Issues
-- Docs: https://docs.aiinterviewer.com

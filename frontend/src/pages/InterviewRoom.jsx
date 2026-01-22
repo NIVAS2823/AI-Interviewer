@@ -37,10 +37,8 @@ export default function InterviewRoom() {
   const [startTime] = useState(Date.now());
   const [elapsedTime, setElapsedTime] = useState(0);
 
-  // mobile drawer state
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  // neon confirm modal
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmText, setConfirmText] = useState("");
   const [confirmAction, setConfirmAction] = useState(null);
@@ -54,9 +52,8 @@ export default function InterviewRoom() {
   const inputRef = useRef(null);
   const hasStartedRef = useRef(false);
   const resizeObserverRef = useRef(null);
-  const [isMounted, setIsMounted] = useState(false); // to avoid race on initial load
+  const [isMounted, setIsMounted] = useState(false);
 
-  // timer tick
   useEffect(() => {
     const t = setInterval(() => {
       setElapsedTime(Math.floor((Date.now() - startTime) / 1000));
@@ -64,21 +61,17 @@ export default function InterviewRoom() {
     return () => clearInterval(t);
   }, [startTime]);
 
-  // initial load (only once per id)
   useEffect(() => {
     if (!hasStartedRef.current) {
       hasStartedRef.current = true;
       loadInterview();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // scroll on new messages or sending
   useEffect(() => {
     scrollToBottom({ smooth: true });
   }, [conversation, isSending]);
 
-  // keep input visible on resize (helps when keyboard opens on mobile)
   useEffect(() => {
     const onResize = () => {
       requestAnimationFrame(() => scrollToBottom({ smooth: false }));
@@ -99,7 +92,6 @@ export default function InterviewRoom() {
         block: "end",
       });
     } catch (e) {
-      /* ignore */
     }
   };
 
@@ -116,9 +108,7 @@ export default function InterviewRoom() {
       }
 
       if (interview.status === "created") {
-        // automatic start then re-fetch
         await interviewAPI.start(id);
-        // short pause for backend to set data
         await new Promise((r) => setTimeout(r, 1200));
         const updated = await interviewAPI.get(id);
         setInterviewData(updated.data);
@@ -180,7 +170,6 @@ export default function InterviewRoom() {
 
       setConversation((prev) => [...prev, aiMsg]);
 
-      // update interviewData (questions, current count, etc.)
       const updated = await interviewAPI.get(id);
       setInterviewData(updated.data);
     } catch (err) {
@@ -214,7 +203,6 @@ export default function InterviewRoom() {
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
 
-  /* ---------- RENDER ---------- */
 
   if (loading) {
     return (
@@ -240,7 +228,6 @@ export default function InterviewRoom() {
   return (
     <>
       <div className="h-screen flex flex-col bg-darkbg text-gray-200">
-        {/* HEADER */}
         <header className="flex items-center justify-between px-5 py-3 border-b border-white/6 bg-darkbg-card z-20">
           <div className="flex items-center gap-4">
             <button
@@ -286,10 +273,8 @@ export default function InterviewRoom() {
           </div>
         </header>
 
-        {/* MAIN GRID */}
         <div className="flex-1 min-h-0 overflow-hidden">
           <div className="h-full grid grid-cols-1 lg:grid-cols-4 gap-6 p-5 min-h-0">
-            {/* CHAT - left / main */}
             <section className="lg:col-span-3 flex flex-col bg-darkbg-card rounded-xl border border-white/6 shadow-2xl min-h-0">
               <div className="flex-1 overflow-y-auto p-6 space-y-4 min-h-0">
                 {conversation.map((msg, idx) => {
@@ -326,7 +311,6 @@ export default function InterviewRoom() {
                 <div ref={messagesEndRef} />
               </div>
 
-              {/* input - fixed at bottom of chat panel */}
               <div className="border-t border-gray-700 p-4 shrink-0 bg-darkbg-card">
                 <div className="flex items-center space-x-3">
                   <input
@@ -354,7 +338,6 @@ export default function InterviewRoom() {
                     <Send className="w-5 h-5" />
                   </button>
 
-                  {/* drawer toggle for mobile */}
                   <button
                     onClick={() => setDrawerOpen((s) => !s)}
                     className="ml-2 md:hidden p-3 rounded-lg bg-white/5"
@@ -368,7 +351,6 @@ export default function InterviewRoom() {
               </div>
             </section>
 
-            {/* RIGHT SIDEBAR desktop-only: Current Question + Tips */}
             <aside className="hidden lg:flex flex-col space-y-6 h-full">
               <div className="p-4 rounded-xl bg-[#07121a] border border-neon-primary/10 shadow-[0_0_20px_var(--neon-primary)/10]">
                 <div className="flex items-center justify-between mb-3">
@@ -397,7 +379,6 @@ export default function InterviewRoom() {
         </div>
       </div>
 
-      {/* MOBILE BOTTOM DRAWER */}
       <div
         className={`fixed left-0 right-0 bottom-0 z-40 md:hidden transition-transform duration-300 ${drawerOpen ? "translate-y-0" : "translate-y-full"}`}
         aria-hidden={!drawerOpen}
@@ -437,7 +418,6 @@ export default function InterviewRoom() {
         </div>
       </div>
 
-      {/* NEON CONFIRM MODAL (reusable style as in Resumes.jsx) */}
       {confirmOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-darkbg-card p-6 rounded-xl border border-white/10 shadow-xl w-[90%] max-w-md text-center">

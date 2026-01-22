@@ -140,6 +140,25 @@ class WebSocketMessageService:
             "text": text,
             "timestamp": datetime.utcnow().isoformat(),
         }
+    
+    @staticmethod
+    def format_interim_transcript(text: str, is_final: bool = False) -> Dict[str, Any]:
+        """
+        Format interim transcript message for real-time display
+        
+        Args:
+            text: Interim transcript text
+            is_final: Whether this is the final result from streaming
+            
+        Returns:
+            Formatted interim transcript message
+        """
+        return {
+            "type": "interim_transcript",
+            "text": text,
+            "is_final": is_final,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
 
     @staticmethod
     def format_error(

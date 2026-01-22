@@ -8,7 +8,7 @@ from datetime import datetime
 
 from app.models.interview import ConversationMessage, Question
 from app.services.integration.groq_service import GroqService
-
+from app.services.integration.deepgram_streaming_service import DeepgramStreamingService
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +39,7 @@ class VoiceSessionState:
         self.max_questions = max_questions
         self.voice = voice
         
+        
         # Session status
         self.is_active = False
         self.started_at: Optional[datetime] = None
@@ -57,14 +58,27 @@ class VoiceSessionState:
         self.candidate_name: Optional[str] = None
         self.groq_service: GroqService | None = None
 
+        self.streaming_service: Optional[DeepgramStreamingService] = None
+        self.is_streaming: bool = False
+
     def start_session(self):
         """Mark session as started"""
         self.is_active = True
         self.started_at = datetime.utcnow()
         logger.info(f"✅ Session started: {self.interview_id}")
 
-    def end_session(self):
+    async def end_session(self):
         """Mark session as completed"""
+
+        if self.streaming_service and self.is_streaming:
+            try:
+                await self.streaming_service.stop_streaming()
+                logger.info(f"🔇 Streaming stopped for session: {self.interview_id}")
+            except Exception as e:
+                logger.warning(f"⚠️ Error stopping streaming: {e}")
+            finally:
+                self.streaming_service = None
+                self.is_streaming = False
         self.is_active = False
         self.completed_at = datetime.utcnow()
         logger.info(f"✅ Session completed: {self.interview_id}")

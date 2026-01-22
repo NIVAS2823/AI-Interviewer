@@ -19,12 +19,10 @@ class ResponseService:
 
     # Predefined acknowledgments (can be cached)
     ACKNOWLEDGMENTS = [
-        "Thank you for that insight.",
         "I appreciate your detailed answer.",
         "I see, thank you for explaining.",
         "That's a good point.",
         "I understand, thank you.",
-        "Perfect, moving forward.",
     ]
 
     OPENING_GREETINGS = [

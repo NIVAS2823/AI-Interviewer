@@ -458,7 +458,7 @@ class VoiceInterviewOrchestrator:
                 logger.info(f"✅ Recording uploaded: {upload_result['public_url']}")
 
             # End session
-            session.end_session()
+            await session.end_session()
 
             # Remove from session service
             self.session_service.remove_session(session.interview_id)

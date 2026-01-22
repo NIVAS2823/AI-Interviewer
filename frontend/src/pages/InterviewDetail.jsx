@@ -229,12 +229,6 @@ function HeaderSection({ interview, id, navigate,handleSimulate, handleEnd }) {
       <div className="flex items-center space-x-3">
         {interview.status === "created" && (
           <>
-            <Link
-              to={`/interviews/${id}/room`}
-              className="px-5 py-2 rounded-lg bg-neon-primary text-black font-semibold shadow flex items-center"
-            >
-              <PlayCircle className="w-4 h-4 mr-2" /> Join Interview
-            </Link>
 
             <button
   onClick={() => navigate(`/interviews/${id}/voice`)}
@@ -243,13 +237,6 @@ function HeaderSection({ interview, id, navigate,handleSimulate, handleEnd }) {
 >
   🎤 Start Voice Interview
 </button>
-
-            <button
-              onClick={handleSimulate}
-              className="px-5 py-2 rounded-lg border border-white/10 text-gray-300 hover:text-neon-primary transition"
-            >
-              Simulate
-            </button>
           </>
         )}
 
