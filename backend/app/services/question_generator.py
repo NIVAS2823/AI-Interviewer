@@ -205,6 +205,72 @@ class QuestionGeneratorService:
         )
 
         return unique_templates[:max_questions]
+    
+    def _get_difficulty_constraints(self, difficulty: str, resume_context: str) -> str:
+        """
+        Inject strict cognitive constraints based on difficulty.
+        This controls the depth and type of questions.
+    """
+        if difficulty == "easy":
+            return f"""
+STRICT EASY MODE ACTIVATED:
+
+You MUST only ask beginner-level, fundamental, 1-to-1 concept questions.
+
+Allowed topics ONLY:
+- Programming fundamentals
+- Core language concepts (syntax, OOP basics, data types)
+- Simple definitions
+- Basic usage questions
+
+FORBIDDEN in EASY:
+- Framework internals (FastAPI auth, middleware, dependency injection)
+- System design
+- Architecture
+- Distributed systems
+- Caching strategies
+- Scalability
+- Security mechanisms
+- Optimization
+- Performance tuning
+
+If resume mentions advanced topics, IGNORE them for EASY.
+
+Focus only on fundamentals like:
+- What is inheritance?
+- Difference between list and dictionary
+- What is a function?
+- What is an API?
+- What is OOP?
+
+This is a HARD CONSTRAINT.
+"""
+
+        if difficulty == "medium":
+            return """
+MEDIUM MODE:
+
+Ask application-level questions.
+Cover:
+- How things work
+- When to use X vs Y
+- Practical usage
+- Framework usage
+Avoid large system design.
+"""
+
+        return """
+HARD MODE:
+
+Ask system design, architecture, scalability, optimization, and tradeoff questions.
+Cover:
+- Design decisions
+- Architecture
+- Performance
+- Security
+- Scaling
+"""
+
 
     async def _generate_with_ai(
         self,
@@ -226,6 +292,7 @@ class QuestionGeneratorService:
             List of generated questions (may contain duplicates)
         """
         # Build context using QuestionContextBuilder
+       
         resume_context = self.context_builder.build_resume_context(parsed_resume)
         job_context = self.context_builder.build_job_description_context(job_description)
         conv_context = self.context_builder.build_conversation_context(conversation_history)
@@ -233,16 +300,24 @@ class QuestionGeneratorService:
         # Build asked questions summary
         asked_summary = "; ".join(asked_questions[-5:]) if asked_questions else "None"
 
+
+        difficulty_constraints = self._get_difficulty_constraints(
+        difficulty=difficulty,
+        resume_context=resume_context,
+        )
+
         # Construct comprehensive prompt
         prompt = self._build_generation_prompt(
-            resume_context=resume_context,
-            job_context=job_context,
-            conversation_context=conv_context,
-            interview_type=interview_type,
-            difficulty=difficulty,
-            max_questions=max_questions,
-            asked_summary=asked_summary,
-        )
+    resume_context=resume_context,
+    job_context=job_context,
+    conversation_context=conv_context,
+    interview_type=interview_type,
+    difficulty=difficulty,
+    max_questions=max_questions,
+    asked_summary=asked_summary,
+)
+        
+        prompt = difficulty_constraints + "\n\n" + prompt
 
         # System prompt for structured output
         system_prompt = f"""

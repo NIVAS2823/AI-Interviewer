@@ -13,9 +13,9 @@ An intelligent, automated interview system powered by VideoSDK agents and advanc
 ## 🛠 Tech Stack
 
 - **Backend**: FastAPI (Python 3.10+)
-- **Frontend**: React 18 + Vite
+- **Frontend**: React 18 + Vitedpckrt
 - **Databases**: MongoDB (primary), Redis (cache)
-- **Meeting/AI**: VideoSDK Agents, LLAMA , Deepgram (STT), Cogli (TTS)
+- **Meeting/AI**: VideoSDK Agents, LLAMA , Deepgram (STT & TTS)
 - **Infrastructure**: Docker, Docker Compose
 
 ## 📋 Prerequisites
